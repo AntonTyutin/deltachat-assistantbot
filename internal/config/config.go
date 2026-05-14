@@ -24,6 +24,7 @@ type Config struct {
 	LLMMaxCompletionTokens     int
 	MCPServers                 map[string]MCPServerEntry
 	MCPConfigWarnings          []string
+	MetricsAddr                string
 }
 
 func FromEnv() (Config, error) {
@@ -44,6 +45,7 @@ func FromEnv() (Config, error) {
 		LLMMaxCompletionTokens:     llmMaxCompletionTokens(),
 		MCPServers:                 mcpServers,
 		MCPConfigWarnings:          mcpWarnings,
+		MetricsAddr:                strings.TrimSpace(os.Getenv("ASSISTANT_BOT_METRICS_ADDR")),
 	}
 	return cfg, nil
 }

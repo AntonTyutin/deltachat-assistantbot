@@ -7,25 +7,31 @@ import (
 
 	"assistantbot/internal/deltachat"
 	"assistantbot/internal/memory"
+	"assistantbot/internal/metrics"
 	"assistantbot/internal/reply"
 	"assistantbot/internal/storage"
 )
 
 type App struct {
-	delta   deltachat.Client
-	store   *storage.Store
-	memory  *memory.Pipeline
-	replies *reply.Service
-	logger  *slog.Logger
+	delta    deltachat.Client
+	store    *storage.Store
+	memory   *memory.Pipeline
+	replies  *reply.Service
+	logger   *slog.Logger
+	recorder metrics.Recorder
 }
 
-func New(delta deltachat.Client, store *storage.Store, memoryPipeline *memory.Pipeline, replyService *reply.Service, logger *slog.Logger) *App {
+func New(delta deltachat.Client, store *storage.Store, memoryPipeline *memory.Pipeline, replyService *reply.Service, logger *slog.Logger, recorder metrics.Recorder) *App {
+	if recorder == nil {
+		recorder = metrics.Noop
+	}
 	return &App{
-		delta:   delta,
-		store:   store,
-		memory:  memoryPipeline,
-		replies: replyService,
-		logger:  logger,
+		delta:    delta,
+		store:    store,
+		memory:   memoryPipeline,
+		replies:  replyService,
+		logger:   logger,
+		recorder: recorder,
 	}
 }
 
@@ -64,10 +70,24 @@ func (a *App) HandleEvent(ctx context.Context, event deltachat.MessageEvent) err
 	}
 }
 
-func (a *App) HandleMessage(ctx context.Context, message deltachat.Message) error {
+func (a *App) HandleMessage(ctx context.Context, message deltachat.Message) (err error) {
 	if message.SentAt.IsZero() {
 		message.SentAt = time.Now()
 	}
+	handleStart := time.Now()
+	var sentReply bool
+	defer func() {
+		result := metrics.ResultError
+		if err == nil {
+			if sentReply {
+				result = metrics.ResultReplied
+			} else {
+				result = metrics.ResultNoReply
+			}
+		}
+		a.recorder.RecordInboundMessageHandle(result, time.Since(handleStart))
+	}()
+
 	if err := a.store.UpsertChat(ctx, storage.Chat{
 		ID:        message.ChatID,
 		IsGroup:   message.IsGroup,
@@ -75,22 +95,31 @@ func (a *App) HandleMessage(ctx context.Context, message deltachat.Message) erro
 	}); err != nil {
 		return err
 	}
+	t0 := time.Now()
 	topic, err := a.memory.ProcessMessage(ctx, message)
 	if err != nil {
 		return err
 	}
+	a.recorder.RecordMessagePhase(metrics.PhaseMemory, time.Since(t0))
+
+	t1 := time.Now()
 	outbound, classification, err := a.replies.Decide(ctx, message, topic)
 	if err != nil {
 		return err
 	}
+	a.recorder.RecordMessagePhase(metrics.PhaseReply, time.Since(t1))
+
 	a.logger.Info("message classified", "chat_id", message.ChatID, "message_id", message.ID, "intent", classification.Intent, "reason", classification.Reason)
 	if outbound == nil {
 		return nil
 	}
+	t2 := time.Now()
 	replyID, err := a.delta.SendText(ctx, *outbound)
 	if err != nil {
 		return err
 	}
+	sentReply = true
+	a.recorder.RecordMessagePhase(metrics.PhaseSend, time.Since(t2))
 	if replyID != "" {
 		if _, err := a.memory.ProcessMessage(ctx, deltachat.Message{
 			ID:         replyID,

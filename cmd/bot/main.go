@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 
 	"assistantbot/internal/app"
@@ -20,6 +22,7 @@ import (
 	"assistantbot/internal/llm"
 	"assistantbot/internal/mcpclient"
 	"assistantbot/internal/memory"
+	"assistantbot/internal/metrics"
 	"assistantbot/internal/reply"
 	"assistantbot/internal/scheduler"
 	"assistantbot/internal/storage"
@@ -189,6 +192,30 @@ func runBot(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	}
 	defer store.Close()
 
+	recorder := metrics.Noop
+	if addr := strings.TrimSpace(cfg.MetricsAddr); addr != "" {
+		reg := prometheus.NewRegistry()
+		recorder = metrics.NewPrometheus(reg, cfg.DeltaChatAccountAddr)
+		srv := &http.Server{
+			Addr:    addr,
+			Handler: promhttp.HandlerFor(reg, promhttp.HandlerOpts{EnableOpenMetrics: true}),
+		}
+		go func() {
+			logger.Info("metrics server listening", "addr", addr)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("metrics server exited", "error", err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				logger.Error("metrics server shutdown", "error", err)
+			}
+		}()
+	}
+
 	llmClient := llm.NewOpenRouterClient(
 		cfg.LLMBaseURL,
 		cfg.LLMAPIKey,
@@ -198,6 +225,7 @@ func runBot(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 		cfg.HTTPTimeout,
 		cfg.LLMMaxCompletionTokens,
 		logger,
+		llm.WithRecorder(recorder),
 	)
 
 	var mcpReg *mcpclient.Registry
@@ -205,7 +233,8 @@ func runBot(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 		logger.Info("connecting mcp servers", "count", len(cfg.MCPServers))
 		httpClient := &http.Client{Timeout: cfg.HTTPTimeout}
 		connectCtx, cancel := context.WithTimeout(ctx, cfg.HTTPTimeout)
-		mcpReg, connectWarnings := mcpclient.Connect(connectCtx, cfg.MCPServers, httpClient)
+		var connectWarnings []string
+		mcpReg, connectWarnings = mcpclient.Connect(connectCtx, cfg.MCPServers, httpClient, recorder)
 		cancel()
 		for _, w := range connectWarnings {
 			logger.Warn("mcp connection", "detail", w)
@@ -217,8 +246,8 @@ func runBot(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 
 	deltaClient := deltachat.NewRPCClient(cfg.DeltaChatRPCServerCmd, cfg.DeltaChatAccountsPath)
 	memoryPipeline := memory.NewPipeline(store, llmClient, mcpReg)
-	replyService := reply.NewService(store, llmClient, cfg.BotNames, mcpReg)
-	bot := app.New(deltaClient, store, memoryPipeline, replyService, logger)
+	replyService := reply.NewService(store, llmClient, cfg.BotNames, mcpReg, recorder)
+	bot := app.New(deltaClient, store, memoryPipeline, replyService, logger, recorder)
 
 	go func() {
 		err := scheduler.RunDaily(ctx, cfg.DailySummaryTime, logger, func(ctx context.Context, date time.Time) error {

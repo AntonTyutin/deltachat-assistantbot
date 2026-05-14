@@ -11,6 +11,8 @@ import (
 	"time"
 
 	openai "github.com/sashabaranov/go-openai"
+
+	"assistantbot/internal/metrics"
 )
 
 type ToolExecutorFunc func(ctx context.Context, toolName string, argumentsJSON string) (string, error)
@@ -27,9 +29,10 @@ type OpenRouterClient struct {
 	maxCompletionTokens  int
 	client               *openai.Client
 	logger               *slog.Logger
+	recorder             metrics.Recorder
 }
 
-func NewOpenRouterClient(baseURL, apiKey, defaultModel string, taskModels map[string]string, taskCompletionTokens map[string]int, timeout time.Duration, maxCompletionTokens int, logger *slog.Logger) *OpenRouterClient {
+func NewOpenRouterClient(baseURL, apiKey, defaultModel string, taskModels map[string]string, taskCompletionTokens map[string]int, timeout time.Duration, maxCompletionTokens int, logger *slog.Logger, opts ...OpenRouterOption) *OpenRouterClient {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -42,7 +45,7 @@ func NewOpenRouterClient(baseURL, apiKey, defaultModel string, taskModels map[st
 		Timeout: timeout,
 	}
 
-	return &OpenRouterClient{
+	c := &OpenRouterClient{
 		defaultModels:        parseModelList(defaultModel),
 		taskModels:           cloneTaskModels(taskModels),
 		taskCompletionTokens: cloneTaskCompletionTokens(taskCompletionTokens),
@@ -50,6 +53,17 @@ func NewOpenRouterClient(baseURL, apiKey, defaultModel string, taskModels map[st
 		client:               openai.NewClientWithConfig(config),
 		logger:               logger,
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
+}
+
+func (c *OpenRouterClient) mrec() metrics.Recorder {
+	if c != nil && c.recorder != nil {
+		return c.recorder
+	}
+	return metrics.Noop
 }
 
 const maxToolOrChatSteps = 12
@@ -71,7 +85,7 @@ func (c *OpenRouterClient) ChatWithTools(ctx context.Context, task string, messa
 	maxTokens := c.maxCompletionTokensForTask(task)
 	for _, model := range models {
 		c.logger.Info("llm chat+tools request started", "task", task, "model", model)
-		text, err := c.chatWithToolsForModel(ctx, model, maxTokens, messages, tools, exec)
+		text, err := c.chatWithToolsForModel(ctx, task, model, maxTokens, messages, tools, exec)
 		if err == nil {
 			c.logger.Info("llm chat+tools request succeeded", "task", task, "model", model)
 			return text, nil
@@ -82,10 +96,11 @@ func (c *OpenRouterClient) ChatWithTools(ctx context.Context, task string, messa
 	return "", fmt.Errorf("all llm model attempts failed for task %q: %w", task, errors.Join(errs...))
 }
 
-func (c *OpenRouterClient) chatWithToolsForModel(ctx context.Context, model string, maxTokens int, base []openai.ChatCompletionMessage, tools []openai.Tool, exec ToolExecutorFunc) (string, error) {
+func (c *OpenRouterClient) chatWithToolsForModel(ctx context.Context, task, model string, maxTokens int, base []openai.ChatCompletionMessage, tools []openai.Tool, exec ToolExecutorFunc) (string, error) {
 	msgs := append([]openai.ChatCompletionMessage{}, base...)
 
 	for step := 0; step < maxToolOrChatSteps; step++ {
+		start := time.Now()
 		resp, err := c.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
 			Model:               model,
 			Messages:            msgs,
@@ -93,17 +108,24 @@ func (c *OpenRouterClient) chatWithToolsForModel(ctx context.Context, model stri
 			Temperature:         0.2,
 			MaxCompletionTokens: maxTokens,
 		})
+		dur := time.Since(start)
 		if err != nil {
+			c.mrec().RecordChatCompletion(task, model, metrics.MethodChatCompletion, dur, err, "", 0, 0, 0)
 			return "", err
 		}
+		u := resp.Usage
 		if len(resp.Choices) == 0 {
+			c.mrec().RecordChatCompletion(task, model, metrics.MethodChatCompletion, dur, nil, "empty_choices", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
 			return "", fmt.Errorf("llm response has no choices")
 		}
 
 		choice := resp.Choices[0].Message
 		if len(choice.ToolCalls) == 0 {
+			c.mrec().RecordChatCompletion(task, model, metrics.MethodChatCompletion, dur, nil, "success", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
 			return strings.TrimSpace(choice.Content), nil
 		}
+
+		c.mrec().RecordChatCompletion(task, model, metrics.MethodChatCompletion, dur, nil, "success", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
 
 		msgs = append(msgs, choice)
 
@@ -121,6 +143,7 @@ func (c *OpenRouterClient) chatWithToolsForModel(ctx context.Context, model stri
 			})
 		}
 	}
+	c.mrec().RecordLLMLogicalFailure(task, model, metrics.MethodChatCompletion, metrics.OutcomeToolLoopLimit)
 	return "", fmt.Errorf("tool loop exceeded %d steps", maxToolOrChatSteps)
 }
 
@@ -151,6 +174,7 @@ func (c *OpenRouterClient) CompleteJSON(ctx context.Context, task string, input 
 }
 
 func (c *OpenRouterClient) completeJSONWithModel(ctx context.Context, model, task, schema string, inputJSON []byte, maxCompletionTokens int) (json.RawMessage, error) {
+	start := time.Now()
 	resp, err := c.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
 		Model: model,
 		Messages: []openai.ChatCompletionMessage{
@@ -166,10 +190,14 @@ func (c *OpenRouterClient) completeJSONWithModel(ctx context.Context, model, tas
 		Temperature:         0.2,
 		MaxCompletionTokens: maxCompletionTokens,
 	})
+	dur := time.Since(start)
 	if err != nil {
+		c.mrec().RecordChatCompletion(task, model, metrics.MethodCompleteJSON, dur, err, "", 0, 0, 0)
 		return nil, err
 	}
+	u := resp.Usage
 	if len(resp.Choices) == 0 {
+		c.mrec().RecordChatCompletion(task, model, metrics.MethodCompleteJSON, dur, nil, "empty_choices", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
 		return nil, fmt.Errorf("llm response has no choices")
 	}
 	content := strings.TrimSpace(resp.Choices[0].Message.Content)
@@ -178,8 +206,10 @@ func (c *OpenRouterClient) completeJSONWithModel(ctx context.Context, model, tas
 	content = strings.TrimSuffix(content, "```")
 	content = strings.TrimSpace(content)
 	if !json.Valid([]byte(content)) {
+		c.mrec().RecordChatCompletion(task, model, metrics.MethodCompleteJSON, dur, nil, "invalid_json", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
 		return nil, fmt.Errorf("llm returned invalid JSON")
 	}
+	c.mrec().RecordChatCompletion(task, model, metrics.MethodCompleteJSON, dur, nil, "success", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
 	return json.RawMessage(content), nil
 }
 
