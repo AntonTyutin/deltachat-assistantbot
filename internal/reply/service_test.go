@@ -206,7 +206,7 @@ func testReplyService(t *testing.T, replyJSON string) (*Service, func()) {
 	client := llm.StaticClient{Responses: map[string]json.RawMessage{
 		taskGenerateReply: json.RawMessage(replyJSON),
 	}}
-	return NewService(store, client, []string{"bot"}, nil), func() {
+	return NewService(store, client, []string{"bot"}, nil, nil), func() {
 		_ = store.Close()
 	}
 }

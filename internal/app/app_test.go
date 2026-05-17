@@ -34,8 +34,9 @@ func TestHandleMessageStoresSentReplyInMemory(t *testing.T) {
 		delta,
 		store,
 		memory.NewPipeline(store, llmClient, nil),
-		reply.NewService(store, llmClient, []string{"чатик"}, nil),
+		reply.NewService(store, llmClient, []string{"чатик"}, nil, nil),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
 	)
 
 	err = app.HandleMessage(ctx, deltachat.Message{

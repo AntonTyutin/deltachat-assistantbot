@@ -26,6 +26,22 @@ func NewRPCClient(serverCmd, accountsPath string) *RPCClient {
 	}
 }
 
+// ConfiguredAccountAddr returns the configured e-mail address of the sole account
+// in accountsPath. It opens a short-lived RPC session (same as CLI helpers).
+func (c *RPCClient) ConfiguredAccountAddr(ctx context.Context) (string, error) {
+	rpc, transport, err := openRPC(ctx, c.accountsPath, c.serverCmd)
+	if err != nil {
+		return "", err
+	}
+	defer transport.Close()
+
+	accountID, err := soleAccountID(rpc)
+	if err != nil {
+		return "", err
+	}
+	return configuredAccountAddr(rpc, accountID)
+}
+
 func (c *RPCClient) Run(ctx context.Context, handler EventHandler) error {
 	rpc, transport, err := openRPC(ctx, c.accountsPath, c.serverCmd)
 	if err != nil {

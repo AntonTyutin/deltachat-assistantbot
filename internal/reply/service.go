@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	openai "github.com/sashabaranov/go-openai"
 
 	"assistantbot/internal/deltachat"
 	"assistantbot/internal/llm"
 	"assistantbot/internal/mcpclient"
+	"assistantbot/internal/metrics"
 	"assistantbot/internal/storage"
 )
 
@@ -22,14 +24,19 @@ type Service struct {
 	llm        llm.Client
 	classifier *Classifier
 	mcp        *mcpclient.Registry
+	recorder   metrics.Recorder
 }
 
-func NewService(store *storage.Store, llmClient llm.Client, botNames []string, mcp *mcpclient.Registry) *Service {
+func NewService(store *storage.Store, llmClient llm.Client, botNames []string, mcp *mcpclient.Registry, recorder metrics.Recorder) *Service {
+	if recorder == nil {
+		recorder = metrics.Noop
+	}
 	return &Service{
 		store:      store,
 		llm:        llmClient,
 		classifier: NewClassifier(botNames),
 		mcp:        mcp,
+		recorder:   recorder,
 	}
 }
 
@@ -72,6 +79,15 @@ func (s *Service) Decide(ctx context.Context, message deltachat.Message, topic s
 }
 
 func (s *Service) generate(ctx context.Context, message deltachat.Message, topic storage.Topic, classification Classification) (string, error) {
+	path := metrics.ReplyPathJSON
+	if s.mcp != nil && len(s.mcp.OpenAITools()) > 0 {
+		path = metrics.ReplyPathMCPTools
+	}
+	start := time.Now()
+	defer func() {
+		s.recorder.RecordReplyGenerate(path, time.Since(start))
+	}()
+
 	recent, err := s.store.RecentMessages(ctx, message.ChatID, 20)
 	if err != nil {
 		return "", err

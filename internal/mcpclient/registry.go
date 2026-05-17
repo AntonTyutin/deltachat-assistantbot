@@ -9,11 +9,13 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	openai "github.com/sashabaranov/go-openai"
 
 	"assistantbot/internal/config"
+	"assistantbot/internal/metrics"
 )
 
 const toolNameSep = "__"
@@ -24,6 +26,7 @@ type Registry struct {
 	routes             map[string]route
 	tools              []openai.Tool
 	systemPromptAppend []string
+	recorder           metrics.Recorder
 }
 
 type route struct {
@@ -34,7 +37,7 @@ type route struct {
 // Connect dials each configured MCP server, lists tools, and builds OpenAI tool definitions
 // with names "serverID__originalToolName". Servers that fail to connect or list tools are skipped;
 // messages for logging are returned in warnings. If every server fails, reg is nil.
-func Connect(ctx context.Context, servers map[string]config.MCPServerEntry, httpClient *http.Client) (reg *Registry, warnings []string) {
+func Connect(ctx context.Context, servers map[string]config.MCPServerEntry, httpClient *http.Client, recorder metrics.Recorder) (reg *Registry, warnings []string) {
 	if len(servers) == 0 {
 		return nil, nil
 	}
@@ -51,6 +54,7 @@ func Connect(ctx context.Context, servers map[string]config.MCPServerEntry, http
 	reg = &Registry{
 		sessions: make(map[string]*mcp.ClientSession, len(servers)),
 		routes:   make(map[string]route),
+		recorder: recorder,
 	}
 
 	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "Assistant Bot", Version: "1"}, nil)
@@ -200,7 +204,21 @@ func (r *Registry) SystemPromptAppend() string {
 }
 
 // ExecuteTool runs a prefixed tool name on the correct MCP session.
-func (r *Registry) ExecuteTool(ctx context.Context, prefixedName string, argumentsJSON string) (string, error) {
+func (r *Registry) ExecuteTool(ctx context.Context, prefixedName string, argumentsJSON string) (_ string, err error) {
+	start := time.Now()
+	serverID, toolName := "unknown", prefixedName
+	defer func() {
+		rec := metrics.Noop
+		if r != nil && r.recorder != nil {
+			rec = r.recorder
+		}
+		outcome := "success"
+		if err != nil {
+			outcome = mcpOutcome(err)
+		}
+		rec.RecordMCPTool(serverID, toolName, outcome, time.Since(start))
+	}()
+
 	if r == nil {
 		return "", fmt.Errorf("nil mcp registry")
 	}
@@ -208,6 +226,7 @@ func (r *Registry) ExecuteTool(ctx context.Context, prefixedName string, argumen
 	if !ok {
 		return "", fmt.Errorf("unknown MCP tool %q", prefixedName)
 	}
+	serverID, toolName = rt.serverID, rt.toolName
 	session := r.sessions[rt.serverID]
 	if session == nil {
 		return "", fmt.Errorf("no session for server %q", rt.serverID)
@@ -228,6 +247,25 @@ func (r *Registry) ExecuteTool(ctx context.Context, prefixedName string, argumen
 		return "", err
 	}
 	return formatToolResult(res), nil
+}
+
+func mcpOutcome(err error) string {
+	if err == nil {
+		return "success"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	if strings.Contains(err.Error(), "unknown MCP tool") {
+		return metrics.OutcomeUnknownTool
+	}
+	if strings.Contains(err.Error(), "no session for server") {
+		return metrics.OutcomeNoSession
+	}
+	if strings.Contains(err.Error(), "tool arguments json") {
+		return metrics.OutcomeInvalidArgs
+	}
+	return "error"
 }
 
 // ExecuteAnyTool tries each provided prefixed tool name until one succeeds.
