@@ -35,15 +35,18 @@ func main() {
 	defer stop()
 
 	if err := newRootCommand(ctx, logger).Execute(); err != nil {
-		logger.Error("command failed", "error", err)
+		if serviceLogging() {
+			logger.Error("command failed", "error", err)
+		}
 		os.Exit(1)
 	}
 }
 
 func newRootCommand(ctx context.Context, logger *slog.Logger) *cobra.Command {
 	root := &cobra.Command{
-		Use:   "assistantbot",
-		Short: "Assistant Bot — DeltaChat assistant CLI",
+		Use:          "assistantbot",
+		Short:        "Assistant Bot — DeltaChat assistant CLI",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.FromEnv()
 			if err != nil {

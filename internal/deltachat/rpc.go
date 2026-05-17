@@ -2,6 +2,7 @@ package deltachat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -285,6 +286,9 @@ func InviteLink(ctx context.Context, serverCmd, accountsPath string) (string, er
 	if err != nil {
 		return "", err
 	}
+	if err := ensureAccountConfigured(rpc, accountID); err != nil {
+		return "", err
+	}
 	return rpc.GetChatSecurejoinQrCode(accountID, nil)
 }
 
@@ -332,15 +336,38 @@ func UpdateBotProfile(ctx context.Context, serverCmd, accountsPath string, updat
 }
 
 func openRPC(ctx context.Context, accountsPath, serverCmd string) (*chatmail.Rpc, *chatmail.IOTransport, error) {
+	if err := validateAccountsDir(accountsPath); err != nil {
+		return nil, nil, err
+	}
+
 	trans := chatmail.NewIOTransport()
 	if serverCmd != "" {
 		trans.Cmd = serverCmd
 	}
 	trans.AccountsDir = accountsPath
+	trans.Stderr = rpcServerStderr()
 	if err := trans.Open(); err != nil {
-		return nil, nil, err
+		return nil, nil, mapOpenRPCError(err, accountsPath)
 	}
 	return &chatmail.Rpc{Context: ctx, Transport: trans}, trans, nil
+}
+
+func ensureAccountConfigured(rpc *chatmail.Rpc, accountID uint32) error {
+	configured, err := rpc.IsConfigured(accountID)
+	if err != nil {
+		return err
+	}
+	if !configured {
+		return fmt.Errorf("DeltaChat account is not configured; run `assistantbot setup-account --qr-data=...`")
+	}
+	return nil
+}
+
+func mapOpenRPCError(err error, accountsPath string) error {
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("deltachat RPC server stopped unexpectedly; check %s is writable and the account is configured", accountsPath)
+	}
+	return err
 }
 
 func firstOrCreateAccount(rpc *chatmail.Rpc) (uint32, error) {
