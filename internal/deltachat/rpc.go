@@ -223,19 +223,44 @@ func (c *RPCClient) SendText(ctx context.Context, message OutboundMessage) (stri
 	return strconv.FormatUint(uint64(messageID), 10), nil
 }
 
+// rpcMessagePayload loads get_message JSON without chatmail.Message's custom
+// UnmarshalJSON, which panics when "quote" is set (rpc-client-go v2.49.0 bug).
+type rpcMessagePayload struct {
+	ChatId            uint32           `json:"chatId"`
+	FromId            uint32           `json:"fromId"`
+	Id                uint32           `json:"id"`
+	ParentId          *uint32          `json:"parentId,omitempty"`
+	Sender            chatmail.Contact `json:"sender"`
+	Text              string           `json:"text"`
+	Timestamp         int64            `json:"timestamp"`
+	ReceivedTimestamp int64            `json:"receivedTimestamp"`
+	State             uint32           `json:"state"`
+}
+
 func (c *RPCClient) loadMessage(accountID uint32, msgID uint32) (message Message, err error) {
 	defer recoverRPCPanic(&err)
 
-	msg, err := c.rpc.GetMessage(accountID, msgID)
-	if err != nil {
+	var payload rpcMessagePayload
+	if err := c.rpc.Transport.CallResult(c.rpc.Context, &payload, "get_message", accountID, msgID); err != nil {
 		return Message{}, err
 	}
-	if msg.FromId <= chatmail.ContactLastSpecial {
+	if payload.FromId <= chatmail.ContactLastSpecial {
 		return Message{}, nil
 	}
-	chat, err := c.rpc.GetBasicChatInfo(accountID, msg.ChatId)
+	chat, err := c.rpc.GetBasicChatInfo(accountID, payload.ChatId)
 	if err != nil {
 		return Message{}, err
+	}
+	msg := chatmail.Message{
+		Id:                payload.Id,
+		ChatId:            payload.ChatId,
+		FromId:            payload.FromId,
+		ParentId:          payload.ParentId,
+		Sender:            payload.Sender,
+		Text:              payload.Text,
+		Timestamp:         payload.Timestamp,
+		ReceivedTimestamp: payload.ReceivedTimestamp,
+		State:             payload.State,
 	}
 	return convertMessage(msg, chat), nil
 }

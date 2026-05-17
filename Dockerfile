@@ -22,7 +22,8 @@ WORKDIR /
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /data/deltachat-accounts
+    && mkdir -p /data/deltachat-accounts \
+    && chown -R nobody:nogroup /data
 COPY --from=build --chown=nobody:nogroup /out/assistantbot /assistantbot
 COPY --from=deltachat-rpc --chown=nobody:nogroup /usr/local/cargo/bin/deltachat-rpc-server /deltachat-rpc-server
 ENV DC_ACCOUNTS_PATH=/data/deltachat-accounts
