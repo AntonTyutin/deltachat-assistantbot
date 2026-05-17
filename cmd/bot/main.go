@@ -207,12 +207,14 @@ func runBot(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	if addr := strings.TrimSpace(cfg.MetricsAddr); addr != "" {
 		reg := prometheus.NewRegistry()
 		recorder = metrics.NewPrometheus(reg, metricsBotID)
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 		srv := &http.Server{
 			Addr:    addr,
-			Handler: promhttp.HandlerFor(reg, promhttp.HandlerOpts{EnableOpenMetrics: true}),
+			Handler: mux,
 		}
 		go func() {
-			logger.Info("metrics server listening", "addr", addr)
+			logger.Info("metrics server listening", "addr", addr, "path", "/metrics")
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				logger.Error("metrics server exited", "error", err)
 			}
