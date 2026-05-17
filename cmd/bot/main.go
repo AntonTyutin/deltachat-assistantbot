@@ -192,10 +192,18 @@ func runBot(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	}
 	defer store.Close()
 
+	deltaClient := deltachat.NewRPCClient(cfg.DeltaChatRPCServerCmd, cfg.DeltaChatAccountsPath)
+	metricsBotID := metricsBotIDFallback()
+	if accountAddr, err := deltaClient.ConfiguredAccountAddr(ctx); err != nil {
+		logger.Warn("could not resolve bot account address for metrics bot_id; using hostname", "error", err, "bot_id", metricsBotID)
+	} else {
+		metricsBotID = accountAddr
+	}
+
 	recorder := metrics.Noop
 	if addr := strings.TrimSpace(cfg.MetricsAddr); addr != "" {
 		reg := prometheus.NewRegistry()
-		recorder = metrics.NewPrometheus(reg, cfg.DeltaChatAccountAddr)
+		recorder = metrics.NewPrometheus(reg, metricsBotID)
 		srv := &http.Server{
 			Addr:    addr,
 			Handler: promhttp.HandlerFor(reg, promhttp.HandlerOpts{EnableOpenMetrics: true}),
@@ -244,7 +252,6 @@ func runBot(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 		}
 	}
 
-	deltaClient := deltachat.NewRPCClient(cfg.DeltaChatRPCServerCmd, cfg.DeltaChatAccountsPath)
 	memoryPipeline := memory.NewPipeline(store, llmClient, mcpReg)
 	replyService := reply.NewService(store, llmClient, cfg.BotNames, mcpReg, recorder)
 	bot := app.New(deltaClient, store, memoryPipeline, replyService, logger, recorder)
@@ -267,10 +274,22 @@ func runBot(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 		}
 	}()
 
-	logger.Info("Assistant Bot started", "db_path", cfg.DBPath, "model", cfg.LLMModel, "dc_accounts_path", cfg.DeltaChatAccountsPath)
+	logger.Info("Assistant Bot started", "db_path", cfg.DBPath, "model", cfg.LLMModel, "account", metricsBotID, "dc_accounts_path", cfg.DeltaChatAccountsPath)
 	if err := bot.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("deltachat event loop stopped", "error", err)
 		return err
 	}
 	return nil
+}
+
+func metricsBotIDFallback() string {
+	host, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "unknown"
+	}
+	return host
 }
