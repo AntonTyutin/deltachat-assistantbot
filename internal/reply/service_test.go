@@ -3,6 +3,8 @@ package reply
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,6 +13,40 @@ import (
 	"assistantbot/internal/llm"
 	"assistantbot/internal/storage"
 )
+
+func TestDecideReturnsFailureReplyOnLLMError(t *testing.T) {
+	store, err := storage.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"), "test-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	client := taskFailClient{
+		StaticClient: llm.StaticClient{Responses: map[string]json.RawMessage{}},
+		failTask:     taskGenerateReply,
+	}
+	service := NewService(store, client, []string{"bot"}, nil, nil, nil)
+
+	outbound, _, err := service.Decide(context.Background(), deltachat.Message{
+		ID:       "m1",
+		ChatID:   "chat-1",
+		SenderID: "user-1",
+		Text:     "bot, answer please",
+		IsGroup:  true,
+	}, storage.Topic{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outbound == nil {
+		t.Fatal("expected outbound reply")
+	}
+	if outbound.Text != failureReply {
+		t.Fatalf("expected %q, got %q", failureReply, outbound.Text)
+	}
+	if outbound.ReplyToID != "m1" {
+		t.Fatalf("expected reply_to_id m1, got %q", outbound.ReplyToID)
+	}
+}
 
 func TestDecideKeepsReplyToInGroupChats(t *testing.T) {
 	service, cleanup := testReplyService(t, `{"reply":"ok"}`)
@@ -206,7 +242,19 @@ func testReplyService(t *testing.T, replyJSON string) (*Service, func()) {
 	client := llm.StaticClient{Responses: map[string]json.RawMessage{
 		taskGenerateReply: json.RawMessage(replyJSON),
 	}}
-	return NewService(store, client, []string{"bot"}, nil, nil), func() {
+	return NewService(store, client, []string{"bot"}, nil, nil, nil), func() {
 		_ = store.Close()
 	}
+}
+
+type taskFailClient struct {
+	llm.StaticClient
+	failTask string
+}
+
+func (c taskFailClient) CompleteJSON(ctx context.Context, task string, input any, schema string) (json.RawMessage, error) {
+	if task == c.failTask {
+		return nil, fmt.Errorf("%w for task %q: %w", llm.ErrAllModelsFailed, task, errors.New("429 Too Many Requests"))
+	}
+	return c.StaticClient.CompleteJSON(ctx, task, input, schema)
 }

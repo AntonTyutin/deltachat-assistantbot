@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -17,17 +18,24 @@ import (
 	"assistantbot/internal/storage"
 )
 
-const taskGenerateReply = "generate_chat_reply"
+const (
+	taskGenerateReply = "generate_chat_reply"
+	failureReply      = "😵"
+)
 
 type Service struct {
 	store      *storage.Store
 	llm        llm.Client
 	classifier *Classifier
 	mcp        *mcpclient.Registry
+	logger     *slog.Logger
 	recorder   metrics.Recorder
 }
 
-func NewService(store *storage.Store, llmClient llm.Client, botNames []string, mcp *mcpclient.Registry, recorder metrics.Recorder) *Service {
+func NewService(store *storage.Store, llmClient llm.Client, botNames []string, mcp *mcpclient.Registry, logger *slog.Logger, recorder metrics.Recorder) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if recorder == nil {
 		recorder = metrics.Noop
 	}
@@ -36,6 +44,7 @@ func NewService(store *storage.Store, llmClient llm.Client, botNames []string, m
 		llm:        llmClient,
 		classifier: NewClassifier(botNames),
 		mcp:        mcp,
+		logger:     logger,
 		recorder:   recorder,
 	}
 }
@@ -61,21 +70,38 @@ func (s *Service) Decide(ctx context.Context, message deltachat.Message, topic s
 	}
 	reply, err := s.generate(ctx, message, topic, classification)
 	if err != nil {
-		return nil, classification, err
+		s.logger.Error("reply generation failed",
+			"chat_id", message.ChatID,
+			"message_id", message.ID,
+			"intent", classification.Intent,
+			"error", err,
+		)
+		return failureOutbound(message), classification, nil
 	}
 	reply = sanitizeDirectAddress(reply, message)
 	if strings.TrimSpace(reply) == "" {
 		return nil, classification, nil
 	}
-	replyToID := ""
+	return outboundMessage(message, reply, replyToID(message)), classification, nil
+}
+
+func replyToID(message deltachat.Message) string {
 	if message.IsGroup {
-		replyToID = message.ID
+		return message.ID
 	}
+	return ""
+}
+
+func failureOutbound(message deltachat.Message) *deltachat.OutboundMessage {
+	return outboundMessage(message, failureReply, replyToID(message))
+}
+
+func outboundMessage(message deltachat.Message, text, replyToID string) *deltachat.OutboundMessage {
 	return &deltachat.OutboundMessage{
 		ChatID:    message.ChatID,
-		Text:      reply,
+		Text:      text,
 		ReplyToID: replyToID,
-	}, classification, nil
+	}
 }
 
 func (s *Service) generate(ctx context.Context, message deltachat.Message, topic storage.Topic, classification Classification) (string, error) {

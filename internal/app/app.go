@@ -39,7 +39,15 @@ func (a *App) Run(ctx context.Context) error {
 	return a.delta.Run(ctx, a.HandleEvent)
 }
 
-func (a *App) HandleEvent(ctx context.Context, event deltachat.MessageEvent) error {
+func (a *App) HandleEvent(ctx context.Context, event deltachat.MessageEvent) (err error) {
+	defer func() {
+		if err == nil {
+			return
+		}
+		a.logEventHandlerError(event, err)
+		err = nil
+	}()
+
 	switch event.Kind {
 	case deltachat.MessageEventNew:
 		return a.HandleMessage(ctx, event.Message)
@@ -68,6 +76,23 @@ func (a *App) HandleEvent(ctx context.Context, event deltachat.MessageEvent) err
 		a.logger.Warn("unknown message event kind", "kind", event.Kind, "chat_id", event.ChatID, "message_id", event.MessageID)
 		return nil
 	}
+}
+
+func (a *App) logEventHandlerError(event deltachat.MessageEvent, err error) {
+	args := []any{
+		"event_kind", event.Kind,
+		"error", err,
+	}
+	if event.ChatID != "" {
+		args = append(args, "chat_id", event.ChatID)
+	}
+	if event.MessageID != "" {
+		args = append(args, "message_id", event.MessageID)
+	}
+	if event.ParticipantID != "" {
+		args = append(args, "participant_id", event.ParticipantID)
+	}
+	a.logger.Error("message event handler failed", args...)
 }
 
 func (a *App) HandleMessage(ctx context.Context, message deltachat.Message) (err error) {

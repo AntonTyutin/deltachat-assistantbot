@@ -3,7 +3,6 @@ package llm
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -93,7 +92,9 @@ func (c *OpenRouterClient) ChatWithTools(ctx context.Context, task string, messa
 		c.logger.Warn("llm chat+tools failed, trying fallback if available", "task", task, "model", model, "error", err)
 		errs = append(errs, fmt.Errorf("%s: %w", model, err))
 	}
-	return "", fmt.Errorf("all llm model attempts failed for task %q: %w", task, errors.Join(errs...))
+	finalErr := allModelsFailedError(task, errs)
+	c.logger.Error("llm chat+tools failed for all configured models", "task", task, "models", models, "error", finalErr)
+	return "", finalErr
 }
 
 func (c *OpenRouterClient) chatWithToolsForModel(ctx context.Context, task, model string, maxTokens int, base []openai.ChatCompletionMessage, tools []openai.Tool, exec ToolExecutorFunc) (string, error) {
@@ -168,7 +169,7 @@ func (c *OpenRouterClient) CompleteJSON(ctx context.Context, task string, input 
 		c.logger.Warn("llm request failed, trying fallback if available", "task", task, "model", model, "error", err)
 		errs = append(errs, fmt.Errorf("%s: %w", model, err))
 	}
-	finalErr := fmt.Errorf("all llm model attempts failed for task %q: %w", task, errors.Join(errs...))
+	finalErr := allModelsFailedError(task, errs)
 	c.logger.Error("llm request failed for all configured models", "task", task, "models", models, "error", finalErr)
 	return nil, finalErr
 }

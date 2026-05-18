@@ -258,7 +258,7 @@ func runBot(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	}
 
 	memoryPipeline := memory.NewPipeline(store, llmClient, mcpReg)
-	replyService := reply.NewService(store, llmClient, cfg.BotNames, mcpReg, recorder)
+	replyService := reply.NewService(store, llmClient, cfg.BotNames, mcpReg, logger, recorder)
 	bot := app.New(deltaClient, store, memoryPipeline, replyService, logger, recorder)
 
 	go func() {
