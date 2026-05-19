@@ -27,10 +27,12 @@ type Prometheus struct {
 	replyGenerate        *prometheus.HistogramVec
 	messagePhase         *prometheus.HistogramVec
 	inboundMessageHandle *prometheus.HistogramVec
+	serviceStarted       *prometheus.CounterVec
 }
 
-// NewPrometheus registers all metric collectors with reg and returns a Recorder.
-func NewPrometheus(reg prometheus.Registerer, botID string) *Prometheus {
+// NewPrometheus registers all metric collectors with reg, records one service_started
+// event for the given version, and returns a Recorder.
+func NewPrometheus(reg prometheus.Registerer, botID, version string) *Prometheus {
 	botID = strings.TrimSpace(botID)
 	if botID == "" {
 		botID = "unknown"
@@ -123,6 +125,14 @@ func NewPrometheus(reg prometheus.Registerer, botID string) *Prometheus {
 			},
 			[]string{"bot_id", "result"},
 		),
+		serviceStarted: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "service_started",
+				Help:      "Increments by 1 on each process start (use for Grafana deploy annotations).",
+			},
+			[]string{"bot_id", "version"},
+		),
 	}
 
 	reg.MustRegister(
@@ -136,7 +146,13 @@ func NewPrometheus(reg prometheus.Registerer, botID string) *Prometheus {
 		p.replyGenerate,
 		p.messagePhase,
 		p.inboundMessageHandle,
+		p.serviceStarted,
 	)
+	version = strings.TrimSpace(version)
+	if version == "" {
+		version = "unknown"
+	}
+	p.serviceStarted.WithLabelValues(botID, version).Inc()
 	return p
 }
 

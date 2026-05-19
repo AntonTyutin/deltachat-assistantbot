@@ -26,6 +26,7 @@ import (
 	"assistantbot/internal/reply"
 	"assistantbot/internal/scheduler"
 	"assistantbot/internal/storage"
+	"assistantbot/internal/version"
 )
 
 func main() {
@@ -206,7 +207,7 @@ func runBot(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	recorder := metrics.Noop
 	if addr := strings.TrimSpace(cfg.MetricsAddr); addr != "" {
 		reg := prometheus.NewRegistry()
-		recorder = metrics.NewPrometheus(reg, metricsBotID)
+		recorder = metrics.NewPrometheus(reg, metricsBotID, version.Version)
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 		srv := &http.Server{
