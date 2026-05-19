@@ -38,16 +38,22 @@ if [[ ${#messages[@]} -eq 0 ]]; then
 	exit 1
 fi
 
+has_feat_commit=0
 for msg in "${messages[@]}"; do
 	trimmed="${msg#"${msg%%[![:space:]]*}"}"
 	lower="${trimmed,,}"
 	if [[ "$lower" == feat:* ]]; then
-		feature=$((feature + 1))
-		patch=1
-	else
-		patch=$((patch + 1))
+		has_feat_commit=1
+		break
 	fi
 done
+
+if [[ "$has_feat_commit" -eq 1 ]]; then
+	feature=$((feature + 1))
+	patch=1
+else
+	patch=$((patch + 1))
+fi
 
 version="${YEAR}.${feature}.${patch}"
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
