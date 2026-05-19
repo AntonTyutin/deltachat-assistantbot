@@ -60,7 +60,7 @@ jobs:
         run: |
           mkdir -p dist
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-            -ldflags="-s -w" \
+            -ldflags="-s -w -X assistantbot/internal/version.Version=${VERSION}" \
             -o "dist/assistantbot-${VERSION}-linux-amd64" \
             ./cmd/bot
 
@@ -92,6 +92,8 @@ jobs:
           context: .
           target: bot
           push: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.docker_meta.outputs.tags }}
           labels: ${{ steps.docker_meta.outputs.labels }}
           cache-from: type=gha

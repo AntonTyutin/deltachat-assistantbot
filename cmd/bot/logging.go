@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"github.com/mattn/go-isatty"
+
+	"assistantbot/internal/version"
 )
 
 // Application logs go to stderr in service mode (no TTY) so Docker captures them
@@ -17,7 +19,7 @@ func newLogger() *slog.Logger {
 	}
 	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	}))
+	})).With("version", version.Version)
 }
 
 func serviceLogging() bool {

@@ -7,6 +7,8 @@ RUN cargo install --git https://github.com/chatmail/core deltachat-rpc-server --
 
 FROM golang:1.25-bookworm AS build
 
+ARG VERSION=dev
+
 WORKDIR /src
 COPY go.mod go.sum* ./
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -15,7 +17,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/assistantbot ./cmd/bot
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X assistantbot/internal/version.Version=${VERSION}" -o /out/assistantbot ./cmd/bot
 
 FROM debian:bookworm-slim AS bot
 WORKDIR /
