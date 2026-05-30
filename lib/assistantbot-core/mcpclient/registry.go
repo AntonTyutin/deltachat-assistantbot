@@ -64,7 +64,7 @@ func Connect(ctx context.Context, servers map[string]MCPServerEntry, httpClient 
 		if appendText != "" {
 			reg.systemPromptAppend = append(reg.systemPromptAppend, appendText)
 		}
-		transport, err := transportForEntry(ctx, entry, httpClient)
+		transport, err := transportForEntry(entry, httpClient)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("MCP server %q: %v", serverID, err))
 			reg.systemPromptAppend = dropLastIfMatch(reg.systemPromptAppend, appendText)
@@ -129,7 +129,7 @@ func Connect(ctx context.Context, servers map[string]MCPServerEntry, httpClient 
 	return reg, warnings
 }
 
-func transportForEntry(ctx context.Context, entry MCPServerEntry, httpClient *http.Client) (mcp.Transport, error) {
+func transportForEntry(entry MCPServerEntry, httpClient *http.Client) (mcp.Transport, error) {
 	switch strings.TrimSpace(strings.ToLower(entry.Type)) {
 	case "streamable-http":
 		hc := httpClientWithHeaders(httpClient, entry.Headers)
@@ -145,7 +145,10 @@ func transportForEntry(ctx context.Context, entry MCPServerEntry, httpClient *ht
 			HTTPClient: hc,
 		}, nil
 	case "stdio":
-		cmd := exec.CommandContext(ctx, strings.TrimSpace(entry.Command), entry.Args...)
+		// Do not use CommandContext here: Connect is called with a short-lived
+		// timeout context, and canceling it would kill the MCP subprocess while
+		// sessions remain open. Process lifetime is tied to Registry.Close().
+		cmd := exec.Command(strings.TrimSpace(entry.Command), entry.Args...)
 		cmd.Env = MergedProcessEnv(entry.Env)
 		return &mcp.CommandTransport{Command: cmd}, nil
 	default:
