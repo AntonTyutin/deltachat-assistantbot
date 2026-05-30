@@ -40,26 +40,28 @@ Optional:
 - `DC_ACCOUNTS_PATH` — DeltaChat account storage (default `/data/deltachat-accounts`)
 - `DELTACHAT_RPC_SERVER_COMMAND` — path to `deltachat-rpc-server` (default `deltachat-rpc-server`)
 
-Optional MCP configuration: set `ASSISTANT_BOT_MCP_SERVERS_FILE` to a JSON file with a top-level `mcpServers` object. Example:
+Optional MCP configuration: set `ASSISTANT_BOT_MCP_SERVERS_FILE` to a YAML file with a top-level `mcpServers` object. Example:
 
-```json
-{
-  "mcpServers": {
-    "example": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:3000/mcp",
-      "headers": { "Authorization": "Bearer token" },
-      "system_prompt_append": "Optional extra guidance for this server's tools."
-    },
-    "local-tool": {
-      "type": "stdio",
-      "command": "python",
-      "args": ["-m", "my_mcp_server"],
-      "env": { "API_KEY": "secret" }
-    }
-  }
-}
+```yaml
+mcpServers:
+  example:
+    type: streamable-http
+    url: http://127.0.0.1:3000/mcp
+    headers:
+      Authorization: Bearer token
+    tools_filter: "^search_|^fetch_"
+    system_prompt_append: Optional extra guidance for this server's tools.
+  local-tool:
+    type: stdio
+    command: python
+    args:
+      - -m
+      - my_mcp_server
+    env:
+      API_KEY: secret
 ```
+
+Per-server `tools_filter` is an optional regular expression matched against each tool's original name (before the `serverId__` prefix); only matching tools are exposed to the LLM. Omit it to include all tools from the server.
 
 Per-server `system_prompt_append` is appended for MCP tool calls on top of the `generate_chat_reply` prompt from the YAML file (or `default` if that key is missing). Invalid entries or unreachable servers are skipped; the bot logs warnings and continues without those tools.
 
@@ -107,7 +109,7 @@ Each bot instance runs its own RPC server subprocess and supports exactly one ac
 
 Use YAML multiline blocks (`|`) for long prompts and examples. See [`config/llm-prompts.example.yaml`](config/llm-prompts.example.yaml).
 
-MCP servers can add `system_prompt_append` in the MCP JSON config. When the bot generates replies with MCP tools, that text is appended to the `generate_chat_reply` system prompt from the YAML file (or to `default` if `generate_chat_reply` is not set).
+MCP servers can add `system_prompt_append` in the MCP YAML config. When the bot generates replies with MCP tools, that text is appended to the `generate_chat_reply` system prompt from the YAML file (or to `default` if `generate_chat_reply` is not set).
 
 ## LLM models
 

@@ -1,31 +1,33 @@
 package mcpclient
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"regexp"
 	"slices"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 var mcpServerIDRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,62}$`)
 
-// MCPServerEntry is one MCP server in the Cursor-style mcpServers config file.
+// MCPServerEntry is one MCP server in the mcpServers YAML config file.
 // Supported type values: "stdio", "streamable-http", "sse".
 type MCPServerEntry struct {
-	Type               string            `json:"type"`
-	URL                string            `json:"url,omitempty"`
-	Command            string            `json:"command,omitempty"`
-	Args               []string          `json:"args,omitempty"`
-	Env                map[string]string `json:"env,omitempty"`
-	Headers            map[string]string `json:"headers,omitempty"`
-	SystemPromptAppend string            `json:"system_prompt_append,omitempty"`
+	Type               string            `yaml:"type"`
+	URL                string            `yaml:"url,omitempty"`
+	Command            string            `yaml:"command,omitempty"`
+	Args               []string          `yaml:"args,omitempty"`
+	Env                map[string]string `yaml:"env,omitempty"`
+	Headers            map[string]string `yaml:"headers,omitempty"`
+	SystemPromptAppend string            `yaml:"system_prompt_append,omitempty"`
+	ToolsFilter        string            `yaml:"tools_filter,omitempty"`
 }
 
 type mcpServersFileRoot struct {
-	MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	MCPServers map[string]MCPServerEntry `yaml:"mcpServers"`
 }
 
 // ValidateMCPServerURL checks an http(s) MCP endpoint URL: scheme, host, and no embedded credentials.
@@ -103,7 +105,25 @@ func (e MCPServerEntry) Validate(serverID string) error {
 	if hasNUL(e.SystemPromptAppend) {
 		return fmt.Errorf("system_prompt_append contains NUL byte")
 	}
+	if hasNUL(e.ToolsFilter) {
+		return fmt.Errorf("tools_filter contains NUL byte")
+	}
+	if _, err := e.toolsFilterRE(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (e MCPServerEntry) toolsFilterRE() (*regexp.Regexp, error) {
+	pattern := strings.TrimSpace(e.ToolsFilter)
+	if pattern == "" {
+		return nil, nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("tools_filter: %w", err)
+	}
+	return re, nil
 }
 
 func validateStringMap(m map[string]string, field string) error {
@@ -160,8 +180,8 @@ func LoadMCPServersFromFile() (map[string]MCPServerEntry, []string) {
 		return nil, []string{fmt.Sprintf("MCP servers file %q is empty; MCP integration is disabled", path)}
 	}
 	var root mcpServersFileRoot
-	if err := json.Unmarshal(data, &root); err != nil {
-		return nil, []string{fmt.Sprintf("MCP servers file %q: invalid JSON: %v", path, err)}
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, []string{fmt.Sprintf("MCP servers file %q: invalid YAML: %v", path, err)}
 	}
 	if root.MCPServers == nil {
 		return nil, []string{fmt.Sprintf("MCP servers file %q: missing \"mcpServers\" object; MCP integration is disabled", path)}
@@ -172,12 +192,7 @@ func LoadMCPServersFromFile() (map[string]MCPServerEntry, []string) {
 
 	out := make(map[string]MCPServerEntry, len(root.MCPServers))
 	var warnings []string
-	for id, rawMsg := range root.MCPServers {
-		var entry MCPServerEntry
-		if err := json.Unmarshal(rawMsg, &entry); err != nil {
-			warnings = append(warnings, fmt.Sprintf("MCP server %q: invalid entry JSON: %v", id, err))
-			continue
-		}
+	for id, entry := range root.MCPServers {
 		if err := entry.Validate(id); err != nil {
 			warnings = append(warnings, fmt.Sprintf("MCP server %q: %v", id, err))
 			continue

@@ -78,11 +78,23 @@ func Connect(ctx context.Context, servers map[string]MCPServerEntry, httpClient 
 		}
 		reg.sessions[serverID] = session
 
+		toolsFilter, err := entry.toolsFilterRE()
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("MCP server %q: %v", serverID, err))
+			_ = session.Close()
+			delete(reg.sessions, serverID)
+			reg.systemPromptAppend = dropLastIfMatch(reg.systemPromptAppend, appendText)
+			continue
+		}
+
 		var toolErr error
 		for tool, err := range session.Tools(ctx, nil) {
 			if err != nil {
 				toolErr = err
 				break
+			}
+			if toolsFilter != nil && !toolsFilter.MatchString(tool.Name) {
+				continue
 			}
 			prefixed := serverID + toolNameSep + tool.Name
 			reg.routes[prefixed] = route{serverID: serverID, toolName: tool.Name}

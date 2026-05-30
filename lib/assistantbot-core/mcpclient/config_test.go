@@ -78,6 +78,18 @@ func TestMergedProcessEnv(t *testing.T) {
 	}
 }
 
+func TestMCPServerEntryValidateToolsFilter(t *testing.T) {
+	t.Parallel()
+	ok := MCPServerEntry{Type: "stdio", Command: "true", ToolsFilter: "^get_weather"}
+	if err := ok.Validate("weather"); err != nil {
+		t.Fatal(err)
+	}
+	bad := MCPServerEntry{Type: "stdio", Command: "true", ToolsFilter: "[unclosed"}
+	if err := bad.Validate("weather"); err == nil {
+		t.Fatal("expected invalid tools_filter error")
+	}
+}
+
 func TestLoadMCPServersFromFileUnset(t *testing.T) {
 	t.Setenv("ASSISTANT_BOT_MCP_SERVERS_FILE", "")
 	servers, warns := LoadMCPServersFromFile()
@@ -91,15 +103,12 @@ func TestLoadMCPServersFromFileUnset(t *testing.T) {
 
 func TestLoadMCPServersFromFileValid(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "mcp.json")
-	content := `{
-  "mcpServers": {
-    "weather": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:9/mcp"
-    }
-  }
-}`
+	path := filepath.Join(dir, "mcp.yaml")
+	content := `mcpServers:
+  weather:
+    type: streamable-http
+    url: http://127.0.0.1:9/mcp
+`
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -119,17 +128,16 @@ func TestLoadMCPServersFromFileValid(t *testing.T) {
 
 func TestLoadMCPServersFromFileStdio(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "mcp.json")
-	content := `{
-  "mcpServers": {
-    "noop": {
-      "type": "stdio",
-      "command": "true",
-      "args": [],
-      "env": { "FOO": "bar" }
-    }
-  }
-}`
+	path := filepath.Join(dir, "mcp.yaml")
+	content := `mcpServers:
+  noop:
+    type: stdio
+    command: true
+    args: []
+    env:
+      FOO: bar
+    tools_filter: "^noop_"
+`
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -145,17 +153,21 @@ func TestLoadMCPServersFromFileStdio(t *testing.T) {
 	if e.Env["FOO"] != "bar" {
 		t.Fatalf("env: %+v", e.Env)
 	}
+	if e.ToolsFilter != "^noop_" {
+		t.Fatalf("tools_filter: %q", e.ToolsFilter)
+	}
 }
 
 func TestLoadMCPServersFromFileSkipsInvalidServer(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "mcp.json")
-	content := `{
-  "mcpServers": {
-    "bad": { "type": "stdio" },
-    "good": { "type": "streamable-http", "url": "http://127.0.0.1:9/mcp" }
-  }
-}`
+	path := filepath.Join(dir, "mcp.yaml")
+	content := `mcpServers:
+  bad:
+    type: stdio
+  good:
+    type: streamable-http
+    url: http://127.0.0.1:9/mcp
+`
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -172,10 +184,10 @@ func TestLoadMCPServersFromFileSkipsInvalidServer(t *testing.T) {
 	}
 }
 
-func TestLoadMCPServersFromFileInvalidJSON(t *testing.T) {
+func TestLoadMCPServersFromFileInvalidYAML(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "mcp.json")
-	if err := os.WriteFile(path, []byte(`{`), 0o600); err != nil {
+	path := filepath.Join(dir, "mcp.yaml")
+	if err := os.WriteFile(path, []byte("mcpServers:\n  bad: ["), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("ASSISTANT_BOT_MCP_SERVERS_FILE", path)

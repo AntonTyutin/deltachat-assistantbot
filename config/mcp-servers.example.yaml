@@ -1,0 +1,19 @@
+# Example MCP servers config (ASSISTANT_BOT_MCP_SERVERS_FILE).
+# Tool names exposed to the LLM are prefixed: serverId__toolName
+mcpServers:
+  example-http:
+    type: streamable-http
+    url: http://127.0.0.1:3000/mcp
+    headers:
+      Authorization: Bearer token
+    tools_filter: "^search_|^fetch_"
+    system_prompt_append: Optional extra guidance for this server's tools.
+
+  local-tool:
+    type: stdio
+    command: python
+    args:
+      - -m
+      - my_mcp_server
+    env:
+      API_KEY: secret
