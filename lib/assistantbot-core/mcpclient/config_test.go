@@ -90,6 +90,62 @@ func TestMCPServerEntryValidateToolsFilter(t *testing.T) {
 	}
 }
 
+func TestMCPServerEntryValidateOpenRouterTool(t *testing.T) {
+	t.Parallel()
+	ok := MCPServerEntry{
+		Type:  "openrouter_tool",
+		Tool:  "web_search",
+		Tasks: []string{"generate_chat_reply"},
+		Parameters: map[string]any{
+			"max_total_results": 3,
+		},
+	}
+	if err := ok.Validate("search"); err != nil {
+		t.Fatal(err)
+	}
+	missingTasks := MCPServerEntry{Type: "openrouter_tool", Tool: "datetime"}
+	if err := missingTasks.Validate("clock"); err == nil {
+		t.Fatal("expected missing tasks error")
+	}
+	withCommand := MCPServerEntry{
+		Type:    "openrouter_tool",
+		Tool:    "datetime",
+		Tasks:   []string{"generate_chat_reply"},
+		Command: "true",
+	}
+	if err := withCommand.Validate("clock"); err == nil {
+		t.Fatal("expected command forbidden error")
+	}
+	badTool := MCPServerEntry{
+		Type:  "openrouter_tool",
+		Tool:  "unknown",
+		Tasks: []string{"generate_chat_reply"},
+	}
+	if err := badTool.Validate("bad"); err == nil {
+		t.Fatal("expected unsupported tool error")
+	}
+}
+
+func TestMCPServerEntryValidateTasksOnStdio(t *testing.T) {
+	t.Parallel()
+	ok := MCPServerEntry{
+		Type:    "stdio",
+		Command: "true",
+		Tasks:   []string{"chat_with_tools"},
+	}
+	if err := ok.Validate("local"); err != nil {
+		t.Fatal(err)
+	}
+	badTask := MCPServerEntry{
+		Type:    "stdio",
+		Command: "true",
+		Tasks:   []string{"not_a_task"},
+	}
+	if err := badTask.Validate("local"); err == nil {
+		t.Fatal("expected unknown task error")
+	}
+}
+
 func TestLoadMCPServersFromFileUnset(t *testing.T) {
 	t.Setenv("ASSISTANT_BOT_MCP_SERVERS_FILE", "")
 	servers, warns := LoadMCPServersFromFile()

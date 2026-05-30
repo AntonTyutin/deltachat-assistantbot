@@ -9,12 +9,14 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/AntonTyutin/assistantbot-core/llm"
 )
 
 var mcpServerIDRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,62}$`)
 
-// MCPServerEntry is one MCP server in the mcpServers YAML config file.
-// Supported type values: "stdio", "streamable-http", "sse".
+// MCPServerEntry is one tool server in the mcpServers YAML config file.
+// Supported type values: "stdio", "streamable-http", "sse", "openrouter_tool".
 type MCPServerEntry struct {
 	Type               string            `yaml:"type"`
 	URL                string            `yaml:"url,omitempty"`
@@ -24,7 +26,12 @@ type MCPServerEntry struct {
 	Headers            map[string]string `yaml:"headers,omitempty"`
 	SystemPromptAppend string            `yaml:"system_prompt_append,omitempty"`
 	ToolsFilter        string            `yaml:"tools_filter,omitempty"`
+	Tool               string            `yaml:"tool,omitempty"`
+	Tasks              []string          `yaml:"tasks,omitempty"`
+	Parameters         map[string]any    `yaml:"parameters,omitempty"`
 }
+
+var defaultToolTasks = []string{llm.TaskGenerateChatReply, llm.TaskChatWithTools}
 
 type mcpServersFileRoot struct {
 	MCPServers map[string]MCPServerEntry `yaml:"mcpServers"`
@@ -62,6 +69,9 @@ func (e MCPServerEntry) Validate(serverID string) error {
 	case "":
 		return fmt.Errorf("missing type")
 	case "stdio":
+		if err := e.validateOpenRouterExclusiveFields("stdio"); err != nil {
+			return err
+		}
 		if strings.TrimSpace(e.Command) == "" {
 			return fmt.Errorf("stdio server requires non-empty command")
 		}
@@ -83,6 +93,9 @@ func (e MCPServerEntry) Validate(serverID string) error {
 			return fmt.Errorf("stdio server must not set headers")
 		}
 	case "streamable-http", "sse":
+		if err := e.validateTransportOnlyFields(typ); err != nil {
+			return err
+		}
 		urlStr := strings.TrimSpace(e.URL)
 		if urlStr == "" {
 			return fmt.Errorf("missing url")
@@ -90,17 +103,24 @@ func (e MCPServerEntry) Validate(serverID string) error {
 		if err := ValidateMCPServerURL(urlStr); err != nil {
 			return fmt.Errorf("url: %w", err)
 		}
-		if strings.TrimSpace(e.Command) != "" || len(e.Args) > 0 {
-			return fmt.Errorf("%s server must not set command or args", typ)
-		}
-		if len(e.Env) > 0 {
-			return fmt.Errorf("%s server must not set env", typ)
-		}
 		if err := validateStringMap(e.Headers, "headers"); err != nil {
 			return err
 		}
+	case "openrouter_tool":
+		if err := e.validateOpenRouterOnlyFields(); err != nil {
+			return err
+		}
+		if _, err := normalizeOpenRouterTool(e.Tool); err != nil {
+			return err
+		}
+		if len(e.Tasks) == 0 {
+			return fmt.Errorf("openrouter_tool requires non-empty tasks")
+		}
 	default:
-		return fmt.Errorf("unsupported type %q (supported: stdio, streamable-http, sse)", e.Type)
+		return fmt.Errorf("unsupported type %q (supported: stdio, streamable-http, sse, openrouter_tool)", e.Type)
+	}
+	if err := validateTaskIDs(e.Tasks); err != nil {
+		return err
 	}
 	if hasNUL(e.SystemPromptAppend) {
 		return fmt.Errorf("system_prompt_append contains NUL byte")
@@ -112,6 +132,77 @@ func (e MCPServerEntry) Validate(serverID string) error {
 		return err
 	}
 	return nil
+}
+
+func (e MCPServerEntry) validateOpenRouterExclusiveFields(typ string) error {
+	if strings.TrimSpace(e.Tool) != "" {
+		return fmt.Errorf("%s server must not set tool", typ)
+	}
+	if len(e.Parameters) > 0 {
+		return fmt.Errorf("%s server must not set parameters", typ)
+	}
+	return nil
+}
+
+func (e MCPServerEntry) validateTransportOnlyFields(typ string) error {
+	if err := e.validateOpenRouterExclusiveFields(typ); err != nil {
+		return err
+	}
+	if strings.TrimSpace(e.Command) != "" || len(e.Args) > 0 {
+		return fmt.Errorf("%s server must not set command or args", typ)
+	}
+	if len(e.Env) > 0 {
+		return fmt.Errorf("%s server must not set env", typ)
+	}
+	return nil
+}
+
+func (e MCPServerEntry) validateOpenRouterOnlyFields() error {
+	if strings.TrimSpace(e.Command) != "" || len(e.Args) > 0 {
+		return fmt.Errorf("openrouter_tool must not set command or args")
+	}
+	if strings.TrimSpace(e.URL) != "" {
+		return fmt.Errorf("openrouter_tool must not set url")
+	}
+	if len(e.Env) > 0 {
+		return fmt.Errorf("openrouter_tool must not set env")
+	}
+	if len(e.Headers) > 0 {
+		return fmt.Errorf("openrouter_tool must not set headers")
+	}
+	if strings.TrimSpace(e.ToolsFilter) != "" {
+		return fmt.Errorf("openrouter_tool must not set tools_filter")
+	}
+	return nil
+}
+
+func validateTaskIDs(tasks []string) error {
+	for _, task := range tasks {
+		task = strings.TrimSpace(task)
+		if task == "" {
+			return fmt.Errorf("tasks contains empty entry")
+		}
+		if !llm.IsTaskID(task) {
+			return fmt.Errorf("unknown task %q", task)
+		}
+	}
+	return nil
+}
+
+func entryTasks(entry MCPServerEntry) []string {
+	if len(entry.Tasks) > 0 {
+		return append([]string(nil), entry.Tasks...)
+	}
+	return append([]string(nil), defaultToolTasks...)
+}
+
+func entryMatchesTask(entryTasks []string, task string) bool {
+	for _, t := range entryTasks {
+		if t == task {
+			return true
+		}
+	}
+	return false
 }
 
 func (e MCPServerEntry) toolsFilterRE() (*regexp.Regexp, error) {

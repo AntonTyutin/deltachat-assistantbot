@@ -281,7 +281,7 @@ func (rebuildClient) CompleteJSON(_ context.Context, task string, input any, _ s
 	}
 }
 
-func (rebuildClient) ChatWithTools(context.Context, string, []openai.ChatCompletionMessage, []openai.Tool, llm.ToolExecutorFunc) (string, error) {
+func (rebuildClient) ChatWithTools(context.Context, string, []openai.ChatCompletionMessage, []llm.ToolDefinition, llm.ToolExecutorFunc) (string, error) {
 	return "", fmt.Errorf("unexpected ChatWithTools")
 }
 
@@ -326,7 +326,7 @@ func (locationAwareClient) CompleteJSON(context.Context, string, any, string) (j
 	return json.RawMessage(`{"style":"calm","verbosity":"short"}`), nil
 }
 
-func (locationAwareClient) ChatWithTools(_ context.Context, task string, _ []openai.ChatCompletionMessage, tools []openai.Tool, _ llm.ToolExecutorFunc) (string, error) {
+func (locationAwareClient) ChatWithTools(_ context.Context, task string, _ []openai.ChatCompletionMessage, tools []llm.ToolDefinition, _ llm.ToolExecutorFunc) (string, error) {
 	if task != llm.TaskChatWithTools {
 		return "", fmt.Errorf("unexpected task: %s", task)
 	}
@@ -338,22 +338,27 @@ func (locationAwareClient) ChatWithTools(_ context.Context, task string, _ []ope
 
 type fakeMCPTools struct{}
 
-func (fakeMCPTools) OpenAITools() []openai.Tool {
-	return []openai.Tool{
-		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
-				Name:       "mcp__example_tool",
-				Parameters: map[string]any{"type": "object"},
-			},
-		},
+func (fakeMCPTools) ToolsForTask(task string) []llm.ToolDefinition {
+	if task != llm.TaskChatWithTools {
+		return nil
 	}
+	return []llm.ToolDefinition{{
+		Type: string(openai.ToolTypeFunction),
+		Function: &openai.FunctionDefinition{
+			Name:       "mcp__example_tool",
+			Parameters: map[string]any{"type": "object"},
+		},
+	}}
+}
+
+func (fakeMCPTools) HasToolsForTask(task string) bool {
+	return len(fakeMCPTools{}.ToolsForTask(task)) > 0
 }
 
 func (fakeMCPTools) ExecuteTool(context.Context, string, string) (string, error) {
 	return "", nil
 }
 
-func (fakeMCPTools) SystemPromptAppend() string {
+func (fakeMCPTools) SystemPromptAppendForTask(string) string {
 	return ""
 }

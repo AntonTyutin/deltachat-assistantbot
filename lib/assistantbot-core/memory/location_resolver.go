@@ -27,7 +27,7 @@ func (r *LocationResolver) resolveCityFromCoordinates(ctx context.Context, latit
 	if r.mcp == nil {
 		return "", "", nil
 	}
-	tools := r.mcp.OpenAITools()
+	tools := r.mcp.ToolsForTask(llm.TaskChatWithTools)
 	if len(tools) == 0 {
 		return "", "", nil
 	}
@@ -36,7 +36,7 @@ func (r *LocationResolver) resolveCityFromCoordinates(ctx context.Context, latit
 		"longitude": longitude,
 	})
 	text, err := r.llm.ChatWithTools(ctx, llm.TaskChatWithTools, []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: r.prompts.SystemPromptForMCP(r.mcp.SystemPromptAppend())},
+		{Role: openai.ChatMessageRoleSystem, Content: r.prompts.SystemPromptForMCP(r.mcp.SystemPromptAppendForTask(llm.TaskChatWithTools))},
 		{Role: openai.ChatMessageRoleUser, Content: string(userInput)},
 	}, tools, r.mcp.ExecuteTool)
 	if err != nil {

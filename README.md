@@ -40,10 +40,17 @@ Optional:
 - `DC_ACCOUNTS_PATH` — DeltaChat account storage (default `/data/deltachat-accounts`)
 - `DELTACHAT_RPC_SERVER_COMMAND` — path to `deltachat-rpc-server` (default `deltachat-rpc-server`)
 
-Optional MCP configuration: set `ASSISTANT_BOT_MCP_SERVERS_FILE` to a YAML file with a top-level `mcpServers` object. Example:
+Optional tool configuration: set `ASSISTANT_BOT_MCP_SERVERS_FILE` to a YAML file with a top-level `mcpServers` object. Entries can be MCP servers (`stdio`, `streamable-http`, `sse`) or OpenRouter [server tools](https://openrouter.ai/docs/guides/features/server-tools/overview) (`openrouter_tool`). Example:
 
 ```yaml
 mcpServers:
+  web_search:
+    type: openrouter_tool
+    tool: web_search
+    tasks:
+      - generate_chat_reply
+    parameters:
+      max_total_results: 3
   example:
     type: streamable-http
     url: http://127.0.0.1:3000/mcp
@@ -61,9 +68,13 @@ mcpServers:
       API_KEY: secret
 ```
 
-Per-server `tools_filter` is an optional regular expression matched against each tool's original name (before the `serverId__` prefix); only matching tools are exposed to the LLM. Omit it to include all tools from the server.
+For MCP servers, tool names exposed to the LLM are prefixed: `serverId__toolName`. OpenRouter server tools use native types such as `openrouter:web_search` and are executed by OpenRouter (no client-side handler).
 
-Per-server `system_prompt_append` is appended for MCP tool calls on top of the `generate_chat_reply` prompt from the YAML file (or `default` if that key is missing). Invalid entries or unreachable servers are skipped; the bot logs warnings and continues without those tools.
+Per-server `tools_filter` (MCP only) is an optional regular expression matched against each tool's original name (before the `serverId__` prefix); only matching tools are exposed to the LLM. Omit it to include all tools from the server.
+
+Optional `tasks` limits which LLM tasks include tools from that entry (`generate_chat_reply`, `chat_with_tools`, …). MCP servers without `tasks` are included in all tool-using tasks. `openrouter_tool` entries require `tasks`.
+
+Per-server `system_prompt_append` is appended for tool calls on top of the `generate_chat_reply` prompt from the YAML file (or `default` if that key is missing). Invalid entries or unreachable MCP servers are skipped; the bot logs warnings and continues without those tools.
 
 ## Usage
 
@@ -109,7 +120,7 @@ Each bot instance runs its own RPC server subprocess and supports exactly one ac
 
 Use YAML multiline blocks (`|`) for long prompts and examples. See [`config/llm-prompts.example.yaml`](config/llm-prompts.example.yaml).
 
-MCP servers can add `system_prompt_append` in the MCP YAML config. When the bot generates replies with MCP tools, that text is appended to the `generate_chat_reply` system prompt from the YAML file (or to `default` if `generate_chat_reply` is not set).
+MCP servers and OpenRouter server tools share the MCP YAML config (`ASSISTANT_BOT_MCP_SERVERS_FILE`). When the bot generates replies with tools, per-entry `system_prompt_append` is appended to the `generate_chat_reply` system prompt from the prompts YAML file (or to `default` if `generate_chat_reply` is not set).
 
 ## LLM models
 

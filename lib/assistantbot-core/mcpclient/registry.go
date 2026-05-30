@@ -14,18 +14,40 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	openai "github.com/sashabaranov/go-openai"
 
+	"github.com/AntonTyutin/assistantbot-core/llm"
 	"github.com/AntonTyutin/assistantbot-core/metrics"
 )
 
 const toolNameSep = "__"
 
-// Registry holds MCP sessions and maps prefixed tool names back to servers.
+// Registry holds MCP sessions, OpenRouter server tool definitions, and routes for MCP tools.
 type Registry struct {
-	sessions           map[string]*mcp.ClientSession
-	routes             map[string]route
-	tools              []openai.Tool
-	systemPromptAppend []string
-	recorder           metrics.Recorder
+	sessions      map[string]*mcp.ClientSession
+	routes        map[string]route
+	toolEntries   []toolEntry
+	promptAppends []promptAppend
+	recorder      metrics.Recorder
+}
+
+type toolEntry struct {
+	def   llm.ToolDefinition
+	tasks []string
+}
+
+type promptAppend struct {
+	text  string
+	tasks []string
+}
+
+func (r *Registry) addPromptAppend(text string, tasks []string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	r.promptAppends = append(r.promptAppends, promptAppend{
+		text:  text,
+		tasks: append([]string(nil), tasks...),
+	})
 }
 
 type route struct {
@@ -33,9 +55,11 @@ type route struct {
 	toolName string
 }
 
-// Connect dials each configured MCP server, lists tools, and builds OpenAI tool definitions
-// with names "serverID__originalToolName". Servers that fail to connect or list tools are skipped;
-// messages for logging are returned in warnings. If every server fails, reg is nil.
+// Connect registers configured tool servers. MCP servers (stdio/streamable-http/sse) are dialed,
+// their tools listed and exposed as "serverID__originalToolName" function tools; openrouter_tool
+// entries are registered as native OpenRouter server tools without a session. Entries that fail to
+// connect, list tools, or validate are skipped; messages for logging are returned in warnings.
+// If no entry registers successfully, reg is nil.
 func Connect(ctx context.Context, servers map[string]MCPServerEntry, httpClient *http.Client, recorder metrics.Recorder) (reg *Registry, warnings []string) {
 	if len(servers) == 0 {
 		return nil, nil
@@ -60,30 +84,36 @@ func Connect(ctx context.Context, servers map[string]MCPServerEntry, httpClient 
 
 	for _, serverID := range ids {
 		entry := servers[serverID]
-		appendText := strings.TrimSpace(entry.SystemPromptAppend)
-		if appendText != "" {
-			reg.systemPromptAppend = append(reg.systemPromptAppend, appendText)
+		tasks := entryTasks(entry)
+
+		if strings.TrimSpace(strings.ToLower(entry.Type)) == "openrouter_tool" {
+			def, err := entry.openRouterToolDefinition()
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("tool server %q: %v", serverID, err))
+				continue
+			}
+			reg.toolEntries = append(reg.toolEntries, toolEntry{def: def, tasks: tasks})
+			reg.addPromptAppend(entry.SystemPromptAppend, tasks)
+			continue
 		}
+
 		transport, err := transportForEntry(entry, httpClient)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("MCP server %q: %v", serverID, err))
-			reg.systemPromptAppend = dropLastIfMatch(reg.systemPromptAppend, appendText)
+			warnings = append(warnings, fmt.Sprintf("tool server %q: %v", serverID, err))
 			continue
 		}
 		session, err := mcpClient.Connect(ctx, transport, nil)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("MCP server %q: connect failed: %v", serverID, err))
-			reg.systemPromptAppend = dropLastIfMatch(reg.systemPromptAppend, appendText)
+			warnings = append(warnings, fmt.Sprintf("tool server %q: connect failed: %v", serverID, err))
 			continue
 		}
 		reg.sessions[serverID] = session
 
 		toolsFilter, err := entry.toolsFilterRE()
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("MCP server %q: %v", serverID, err))
+			warnings = append(warnings, fmt.Sprintf("tool server %q: %v", serverID, err))
 			_ = session.Close()
 			delete(reg.sessions, serverID)
-			reg.systemPromptAppend = dropLastIfMatch(reg.systemPromptAppend, appendText)
 			continue
 		}
 
@@ -103,42 +133,45 @@ func Connect(ctx context.Context, servers map[string]MCPServerEntry, httpClient 
 				toolErr = fmt.Errorf("convert tool %q: %w", tool.Name, convErr)
 				break
 			}
-			reg.tools = append(reg.tools, ft)
+			reg.toolEntries = append(reg.toolEntries, toolEntry{
+				def:   llm.FunctionToolDefinition(ft),
+				tasks: tasks,
+			})
 		}
 		if toolErr != nil {
-			warnings = append(warnings, fmt.Sprintf("MCP server %q: %v", serverID, toolErr))
+			warnings = append(warnings, fmt.Sprintf("tool server %q: %v", serverID, toolErr))
 			_ = session.Close()
 			delete(reg.sessions, serverID)
-			var rmRoutes []string
-			for k := range reg.routes {
-				if strings.HasPrefix(k, serverID+toolNameSep) {
-					rmRoutes = append(rmRoutes, k)
-				}
-			}
-			for _, k := range rmRoutes {
-				delete(reg.routes, k)
-			}
-			var kept []openai.Tool
-			prefix := serverID + toolNameSep
-			for _, t := range reg.tools {
-				if t.Function == nil || !strings.HasPrefix(t.Function.Name, prefix) {
-					kept = append(kept, t)
-				}
-			}
-			reg.tools = kept
-			reg.systemPromptAppend = dropLastIfMatch(reg.systemPromptAppend, appendText)
+			reg.removeToolsForServer(serverID)
+			continue
 		}
+		reg.addPromptAppend(entry.SystemPromptAppend, tasks)
 	}
-	slices.Sort(reg.systemPromptAppend)
 
-	if len(reg.sessions) == 0 {
+	if len(reg.toolEntries) == 0 {
 		_ = reg.Close()
 		if len(warnings) > 0 {
-			warnings = append(warnings, "no MCP servers connected successfully; continuing without MCP tools")
+			warnings = append(warnings, "no tool servers registered successfully; continuing without tools")
 		}
 		return nil, warnings
 	}
 	return reg, warnings
+}
+
+func (r *Registry) removeToolsForServer(serverID string) {
+	prefix := serverID + toolNameSep
+	for k := range r.routes {
+		if strings.HasPrefix(k, prefix) {
+			delete(r.routes, k)
+		}
+	}
+	kept := r.toolEntries[:0:0]
+	for _, e := range r.toolEntries {
+		if e.def.Function == nil || !strings.HasPrefix(e.def.Function.Name, prefix) {
+			kept = append(kept, e)
+		}
+	}
+	r.toolEntries = kept
 }
 
 func transportForEntry(entry MCPServerEntry, httpClient *http.Client) (mcp.Transport, error) {
@@ -168,16 +201,6 @@ func transportForEntry(entry MCPServerEntry, httpClient *http.Client) (mcp.Trans
 	}
 }
 
-func dropLastIfMatch(slice []string, value string) []string {
-	if value == "" || len(slice) == 0 {
-		return slice
-	}
-	if slice[len(slice)-1] == value {
-		return slice[:len(slice)-1]
-	}
-	return slice
-}
-
 func mcpToolToOpenAI(prefixedName string, t *mcp.Tool) (openai.Tool, error) {
 	params := t.InputSchema
 	if params == nil {
@@ -196,25 +219,39 @@ func mcpToolToOpenAI(prefixedName string, t *mcp.Tool) (openai.Tool, error) {
 	}, nil
 }
 
-// OpenAITools returns tool definitions for the chat completion API.
-func (r *Registry) OpenAITools() []openai.Tool {
+// ToolsForTask returns tool definitions enabled for the given LLM task.
+func (r *Registry) ToolsForTask(task string) []llm.ToolDefinition {
 	if r == nil {
 		return nil
 	}
-	return r.tools
+	out := make([]llm.ToolDefinition, 0, len(r.toolEntries))
+	for _, e := range r.toolEntries {
+		if entryMatchesTask(e.tasks, task) {
+			out = append(out, e.def)
+		}
+	}
+	return out
 }
 
-// HasTools reports whether any MCP tools are connected.
-func (r *Registry) HasTools() bool {
-	return r != nil && len(r.tools) > 0
+// HasToolsForTask reports whether any tools are registered for the task.
+func (r *Registry) HasToolsForTask(task string) bool {
+	return r != nil && len(r.ToolsForTask(task)) > 0
 }
 
-// SystemPromptAppend returns extra system prompt guidance supplied by MCP server config.
-func (r *Registry) SystemPromptAppend() string {
-	if r == nil || len(r.systemPromptAppend) == 0 {
+// SystemPromptAppendForTask returns extra system prompt guidance for tools enabled for the task,
+// joined by newlines in deterministic order.
+func (r *Registry) SystemPromptAppendForTask(task string) string {
+	if r == nil || len(r.promptAppends) == 0 {
 		return ""
 	}
-	return strings.Join(r.systemPromptAppend, "\n")
+	var texts []string
+	for _, pa := range r.promptAppends {
+		if entryMatchesTask(pa.tasks, task) {
+			texts = append(texts, pa.text)
+		}
+	}
+	slices.Sort(texts)
+	return strings.Join(texts, "\n")
 }
 
 // ExecuteTool runs a prefixed tool name on the correct MCP session.

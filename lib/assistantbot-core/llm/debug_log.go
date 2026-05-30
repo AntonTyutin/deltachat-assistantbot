@@ -13,6 +13,24 @@ func (c *OpenRouterClient) debugEnabled(ctx context.Context) bool {
 	return c.logger != nil && c.logger.Enabled(ctx, slog.LevelDebug)
 }
 
+func (c *OpenRouterClient) debugLogToolChatRequest(ctx context.Context, task, model, method string, step int, body chatCompletionRequestBody) {
+	if !c.debugEnabled(ctx) {
+		return
+	}
+	attrs := []any{
+		"task", task,
+		"model", model,
+		"method", method,
+		"step", step,
+		"max_completion_tokens", body.MaxCompletionTokens,
+		"messages", body.Messages,
+	}
+	if len(body.Tools) > 0 {
+		attrs = append(attrs, "tools", body.Tools)
+	}
+	c.logger.DebugContext(ctx, "llm request", attrs...)
+}
+
 func (c *OpenRouterClient) debugLogChatRequest(ctx context.Context, task, model, method string, step int, req openai.ChatCompletionRequest) {
 	if !c.debugEnabled(ctx) {
 		return

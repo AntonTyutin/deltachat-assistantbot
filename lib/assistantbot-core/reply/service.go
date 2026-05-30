@@ -106,8 +106,8 @@ func outboundMessage(message transport.Message, text, replyToID string) *transpo
 
 func (s *Service) generate(ctx context.Context, message transport.Message, topic storage.Topic, classification Classification) (string, error) {
 	path := metrics.ReplyPathJSON
-	if s.mcp != nil && len(s.mcp.OpenAITools()) > 0 {
-		path = metrics.ReplyPathMCPTools
+	if s.mcp != nil {
+		path = s.replyToolPath()
 	}
 	start := time.Now()
 	defer func() {
@@ -130,7 +130,7 @@ func (s *Service) generate(ctx context.Context, message transport.Message, topic
 		"recent":  recent,
 	}
 
-	if s.mcp != nil && len(s.mcp.OpenAITools()) > 0 {
+	if s.mcp != nil && s.mcp.HasToolsForTask(llm.TaskGenerateChatReply) {
 		text, err := s.generateWithMCP(ctx, payload)
 		if err != nil {
 			if classification.Intent == IntentSummary {
@@ -163,10 +163,37 @@ func (s *Service) generateWithMCP(ctx context.Context, payload map[string]any) (
 		return "", err
 	}
 	messages := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: s.prompts.SystemPromptForMCP(s.mcp.SystemPromptAppend())},
+		{Role: openai.ChatMessageRoleSystem, Content: s.prompts.SystemPromptForMCP(s.mcp.SystemPromptAppendForTask(llm.TaskGenerateChatReply))},
 		{Role: openai.ChatMessageRoleUser, Content: string(inputJSON)},
 	}
-	return s.llm.ChatWithTools(ctx, llm.TaskGenerateChatReply, messages, s.mcp.OpenAITools(), s.mcp.ExecuteTool)
+	return s.llm.ChatWithTools(ctx, llm.TaskGenerateChatReply, messages, s.mcp.ToolsForTask(llm.TaskGenerateChatReply), s.mcp.ExecuteTool)
+}
+
+func (s *Service) replyToolPath() string {
+	if s.mcp == nil {
+		return metrics.ReplyPathJSON
+	}
+	tools := s.mcp.ToolsForTask(llm.TaskGenerateChatReply)
+	if len(tools) == 0 {
+		return metrics.ReplyPathJSON
+	}
+	hasMCP := false
+	hasOpenRouter := false
+	for _, t := range tools {
+		if llm.IsOpenRouterToolType(t.Type) {
+			hasOpenRouter = true
+		} else {
+			hasMCP = true
+		}
+	}
+	switch {
+	case hasMCP && hasOpenRouter:
+		return metrics.ReplyPathMixedTools
+	case hasOpenRouter:
+		return metrics.ReplyPathOpenRouterTools
+	default:
+		return metrics.ReplyPathMCPTools
+	}
 }
 
 func extractReplyFromModel(text string) string {

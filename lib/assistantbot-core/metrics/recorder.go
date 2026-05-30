@@ -4,13 +4,15 @@ import "time"
 
 // Method labels for LLM metrics.
 const (
-	MethodCompleteJSON   = "complete_json"
-	MethodChatCompletion = "chat_completion"
-	ReplyPathJSON        = "json"
-	ReplyPathMCPTools    = "mcp_tools"
-	PhaseMemory          = "memory"
-	PhaseReply           = "reply"
-	PhaseSend            = "send"
+	MethodCompleteJSON       = "complete_json"
+	MethodChatCompletion     = "chat_completion"
+	ReplyPathJSON            = "json"
+	ReplyPathMCPTools        = "mcp_tools"
+	ReplyPathOpenRouterTools = "openrouter_tools"
+	ReplyPathMixedTools      = "mixed_tools"
+	PhaseMemory              = "memory"
+	PhaseReply               = "reply"
+	PhaseSend                = "send"
 	// InboundMessageHandleResult labels for RecordInboundMessageHandle.
 	ResultReplied        = "replied"
 	ResultNoReply        = "no_reply"

@@ -1,6 +1,14 @@
-# Example MCP servers config (ASSISTANT_BOT_MCP_SERVERS_FILE).
-# Tool names exposed to the LLM are prefixed: serverId__toolName
+# Example tool servers config (ASSISTANT_BOT_MCP_SERVERS_FILE).
+# MCP tool names exposed to the LLM are prefixed: serverId__toolName
 mcpServers:
+  web_search:
+    type: openrouter_tool
+    tool: web_search
+    tasks:
+      - generate_chat_reply
+    parameters:
+      max_total_results: 3
+
   example-http:
     type: streamable-http
     url: http://127.0.0.1:3000/mcp

@@ -426,7 +426,7 @@ func (c *scriptedLLMClient) CompleteJSON(ctx context.Context, task string, input
 	}
 }
 
-func (c *scriptedLLMClient) ChatWithTools(ctx context.Context, task string, messages []openai.ChatCompletionMessage, tools []openai.Tool, exec llm.ToolExecutorFunc) (string, error) {
+func (c *scriptedLLMClient) ChatWithTools(ctx context.Context, task string, messages []openai.ChatCompletionMessage, tools []llm.ToolDefinition, exec llm.ToolExecutorFunc) (string, error) {
 	return "", errors.New("not implemented")
 }
 
@@ -475,7 +475,7 @@ func (c taskFailClient) CompleteJSON(ctx context.Context, task string, input any
 	return c.StaticClient.CompleteJSON(ctx, task, input, schema)
 }
 
-func (c taskFailClient) ChatWithTools(ctx context.Context, task string, messages []openai.ChatCompletionMessage, tools []openai.Tool, exec llm.ToolExecutorFunc) (string, error) {
+func (c taskFailClient) ChatWithTools(ctx context.Context, task string, messages []openai.ChatCompletionMessage, tools []llm.ToolDefinition, exec llm.ToolExecutorFunc) (string, error) {
 	if task == c.failTask {
 		return "", fmt.Errorf("%w for task %q: %w", llm.ErrAllModelsFailed, task, errors.New("429 Too Many Requests"))
 	}

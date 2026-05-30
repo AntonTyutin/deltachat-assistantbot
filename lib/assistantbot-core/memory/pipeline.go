@@ -6,8 +6,6 @@ import (
 	"errors"
 	"time"
 
-	openai "github.com/sashabaranov/go-openai"
-
 	"github.com/AntonTyutin/assistantbot-core/llm"
 	"github.com/AntonTyutin/assistantbot-core/storage"
 	"github.com/AntonTyutin/assistantbot-core/transport"
@@ -24,9 +22,10 @@ type Pipeline struct {
 }
 
 type mcpToolRuntime interface {
-	OpenAITools() []openai.Tool
+	ToolsForTask(task string) []llm.ToolDefinition
+	HasToolsForTask(task string) bool
 	ExecuteTool(ctx context.Context, prefixedName string, argumentsJSON string) (string, error)
-	SystemPromptAppend() string
+	SystemPromptAppendForTask(task string) string
 }
 
 func NewPipeline(store *storage.Store, llmClient llm.Client, mcp mcpToolRuntime, promptReg promptRegistry) *Pipeline {

@@ -1,9 +1,11 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -19,7 +21,7 @@ type ToolExecutorFunc func(ctx context.Context, toolName string, argumentsJSON s
 
 type Client interface {
 	CompleteJSON(ctx context.Context, task string, input any, schema string) (json.RawMessage, error)
-	ChatWithTools(ctx context.Context, task string, messages []openai.ChatCompletionMessage, tools []openai.Tool, exec ToolExecutorFunc) (string, error)
+	ChatWithTools(ctx context.Context, task string, messages []openai.ChatCompletionMessage, tools []ToolDefinition, exec ToolExecutorFunc) (string, error)
 }
 
 type OpenRouterClient struct {
@@ -28,6 +30,9 @@ type OpenRouterClient struct {
 	taskCompletionTokens   map[string]int
 	maxCompletionTokens    int
 	retryBackoffMultiplier float64
+	baseURL                string
+	apiKey                 string
+	httpClient             *http.Client
 	client                 *openai.Client
 	logger                 *slog.Logger
 	recorder               metrics.Recorder
@@ -42,10 +47,10 @@ func NewOpenRouterClient(baseURL, apiKey, defaultModel string, taskModels map[st
 		maxCompletionTokens = 2048
 	}
 	config := openai.DefaultConfig(apiKey)
-	config.BaseURL = strings.TrimRight(baseURL, "/")
-	config.HTTPClient = &http.Client{
-		Timeout: timeout,
-	}
+	trimmedURL := strings.TrimRight(baseURL, "/")
+	config.BaseURL = trimmedURL
+	httpClient := &http.Client{Timeout: timeout}
+	config.HTTPClient = httpClient
 
 	c := &OpenRouterClient{
 		defaultModels:          parseModelList(defaultModel),
@@ -53,6 +58,9 @@ func NewOpenRouterClient(baseURL, apiKey, defaultModel string, taskModels map[st
 		taskCompletionTokens:   cloneTaskCompletionTokens(taskCompletionTokens),
 		maxCompletionTokens:    maxCompletionTokens,
 		retryBackoffMultiplier: defaultRetryBackoffMultiplier,
+		baseURL:                trimmedURL,
+		apiKey:                 apiKey,
+		httpClient:             httpClient,
 		client:                 openai.NewClientWithConfig(config),
 		logger:                 logger,
 	}
@@ -73,7 +81,7 @@ const maxToolOrChatSteps = 12
 
 // ChatWithTools runs a multi-turn chat with tool calling until the model returns a final
 // text message with no tool calls, or the step limit is hit.
-func (c *OpenRouterClient) ChatWithTools(ctx context.Context, task string, messages []openai.ChatCompletionMessage, tools []openai.Tool, exec ToolExecutorFunc) (string, error) {
+func (c *OpenRouterClient) ChatWithTools(ctx context.Context, task string, messages []openai.ChatCompletionMessage, tools []ToolDefinition, exec ToolExecutorFunc) (string, error) {
 	if len(tools) == 0 {
 		return "", fmt.Errorf("no tools provided for chat with tools")
 	}
@@ -93,20 +101,61 @@ func (c *OpenRouterClient) ChatWithTools(ctx context.Context, task string, messa
 	return text, nil
 }
 
-func (c *OpenRouterClient) chatWithToolsForModel(ctx context.Context, task, model string, maxTokens int, base []openai.ChatCompletionMessage, tools []openai.Tool, exec ToolExecutorFunc) (string, error) {
+type chatCompletionRequestBody struct {
+	Model               string                         `json:"model"`
+	Messages            []openai.ChatCompletionMessage `json:"messages"`
+	Tools               []ToolDefinition               `json:"tools,omitempty"`
+	Temperature         float32                        `json:"temperature"`
+	MaxCompletionTokens int                            `json:"max_completion_tokens,omitempty"`
+}
+
+func (c *OpenRouterClient) createChatCompletionWithTools(ctx context.Context, body chatCompletionRequestBody) (openai.ChatCompletionResponse, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return openai.ChatCompletionResponse{}, fmt.Errorf("marshal chat completion request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(raw))
+	if err != nil {
+		return openai.ChatCompletionResponse{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return openai.ChatCompletionResponse{}, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return openai.ChatCompletionResponse{}, err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return openai.ChatCompletionResponse{}, fmt.Errorf("chat completion http %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var out openai.ChatCompletionResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return openai.ChatCompletionResponse{}, fmt.Errorf("decode chat completion response: %w", err)
+	}
+	return out, nil
+}
+
+func (c *OpenRouterClient) chatWithToolsForModel(ctx context.Context, task, model string, maxTokens int, base []openai.ChatCompletionMessage, tools []ToolDefinition, exec ToolExecutorFunc) (string, error) {
 	msgs := append([]openai.ChatCompletionMessage{}, base...)
 
 	for step := 0; step < maxToolOrChatSteps; step++ {
-		req := openai.ChatCompletionRequest{
+		body := chatCompletionRequestBody{
 			Model:               model,
 			Messages:            msgs,
 			Tools:               tools,
 			Temperature:         0.2,
 			MaxCompletionTokens: maxTokens,
 		}
-		c.debugLogChatRequest(ctx, task, model, metrics.MethodChatCompletion, step, req)
+		c.debugLogToolChatRequest(ctx, task, model, metrics.MethodChatCompletion, step, body)
 		start := time.Now()
-		resp, err := c.client.CreateChatCompletion(ctx, req)
+		resp, err := c.createChatCompletionWithTools(ctx, body)
 		dur := time.Since(start)
 		if err != nil {
 			c.mrec().RecordChatCompletion(task, model, metrics.MethodChatCompletion, dur, err, "", 0, 0, 0)

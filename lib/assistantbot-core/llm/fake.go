@@ -19,6 +19,6 @@ func (c StaticClient) CompleteJSON(_ context.Context, task string, _ any, _ stri
 	return json.RawMessage(`{}`), nil
 }
 
-func (StaticClient) ChatWithTools(context.Context, string, []openai.ChatCompletionMessage, []openai.Tool, ToolExecutorFunc) (string, error) {
+func (StaticClient) ChatWithTools(context.Context, string, []openai.ChatCompletionMessage, []ToolDefinition, ToolExecutorFunc) (string, error) {
 	return "", fmt.Errorf("ChatWithTools not supported by StaticClient")
 }
