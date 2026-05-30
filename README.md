@@ -45,10 +45,11 @@ Optional MCP configuration: set `ASSISTANT_BOT_MCP_SERVERS_FILE` to a JSON file 
 ```json
 {
   "mcpServers": {
-    "weather": {
+    "example": {
       "type": "streamable-http",
       "url": "http://127.0.0.1:3000/mcp",
-      "headers": { "Authorization": "Bearer token" }
+      "headers": { "Authorization": "Bearer token" },
+      "system_prompt_append": "Optional extra guidance for this server's tools."
     },
     "local-tool": {
       "type": "stdio",
@@ -60,7 +61,7 @@ Optional MCP configuration: set `ASSISTANT_BOT_MCP_SERVERS_FILE` to a JSON file 
 }
 ```
 
-Per-server `system_prompt_append` adds extra guidance to the reply system prompt. Invalid entries or unreachable servers are skipped; the bot logs warnings and continues without those tools.
+Per-server `system_prompt_append` is appended for MCP tool calls on top of the `generate_chat_reply` prompt from the YAML file (or `default` if that key is missing). Invalid entries or unreachable servers are skipped; the bot logs warnings and continues without those tools.
 
 ## Usage
 
@@ -97,9 +98,22 @@ DeltaChat access uses `github.com/chatmail/rpc-client-go/v2` behind `internal/de
 
 Each bot instance runs its own RPC server subprocess and supports exactly one account.
 
+## LLM system prompts
+
+`ASSISTANT_BOT_LLM_PROMPTS_FILE` points to a YAML file with system prompts (required to run the bot). Top-level keys:
+
+- `default` — fallback prompt for any task without its own key
+- optional task ids: `generate_chat_reply`, `update_participant_profile`, `rebuild_participant_profile`, `update_chat_topic`, `rebuild_chat_topic`, `daily_summary` (each replaces `default` when set)
+
+Use YAML multiline blocks (`|`) for long prompts and examples. See [`config/llm-prompts.example.yaml`](config/llm-prompts.example.yaml).
+
+MCP servers can add `system_prompt_append` in the MCP JSON config. When the bot generates replies with MCP tools, that text is appended to the `generate_chat_reply` system prompt from the YAML file (or to `default` if `generate_chat_reply` is not set).
+
 ## LLM models
 
-`LLM_MODEL_DEFAULT` applies to every LLM task unless a task-specific override is set. You can supply one model or a fallback list separated by spaces or commas (for example `model-a model-b` or `model-a,model-b`); the bot tries models in order and moves to the next on provider errors or invalid JSON output.
+`LLM_MODEL_DEFAULT` applies to every LLM task unless a task-specific override is set. You can supply one model or a pool separated by spaces or commas (for example `model-a model-b` or `model-a,model-b`); each LLM request picks a model from the pool at random so metrics and logs can compare providers.
+
+On failure the client retries with another random pick (possibly the same model) and exponential backoff. `LLM_RETRY_BACKOFF_MULTIPLIER` sets the backoff factor (default `2`). Reply generation (`generate_chat_reply`) uses up to 3 attempts with a 400ms base delay; background memory tasks use up to 5 attempts with a 1s base delay.
 
 Task-specific variables (same fallback-list format):
 

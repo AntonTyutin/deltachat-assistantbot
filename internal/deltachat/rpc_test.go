@@ -1,9 +1,11 @@
 package deltachat
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
+	"github.com/AntonTyutin/assistantbot-core/transport"
 	chatmail "github.com/chatmail/rpc-client-go/v2/deltachat"
 )
 
@@ -93,4 +95,51 @@ func TestLatestLocationsByContactSingleContact(t *testing.T) {
 func callWithRecoveredRPCPanic() (err error) {
 	defer recoverRPCPanic(&err)
 	panic("boom")
+}
+
+func TestRPCClientUnsupportedActions(t *testing.T) {
+	client := NewRPCClient("deltachat-rpc-server", "/tmp/accounts")
+
+	testCases := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "edit",
+			err:  client.EditMessage(t.Context(), transport.MessageEdit{}),
+		},
+		{
+			name: "delete",
+			err:  client.DeleteMessage(t.Context(), "chat", "message"),
+		},
+		{
+			name: "react",
+			err:  client.React(t.Context(), transport.MessageReaction{}),
+		},
+		{
+			name: "typing",
+			err:  client.SetTyping(t.Context(), transport.TypingState{}),
+		},
+	}
+
+	for _, tc := range testCases {
+		if tc.err == nil {
+			t.Fatalf("%s: expected unsupported error", tc.name)
+		}
+		if !isUnsupportedCapability(tc.err) {
+			t.Fatalf("%s: expected unsupported capability error, got %v", tc.name, tc.err)
+		}
+	}
+
+	_, err := client.SendMedia(t.Context(), transport.MediaMessage{})
+	if err == nil {
+		t.Fatal("send_media: expected unsupported error")
+	}
+	if !isUnsupportedCapability(err) {
+		t.Fatalf("send_media: expected unsupported capability error, got %v", err)
+	}
+}
+
+func isUnsupportedCapability(err error) bool {
+	return errors.Is(err, transport.ErrUnsupportedCapability)
 }

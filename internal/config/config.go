@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/AntonTyutin/assistantbot-core/mcpclient"
 )
 
 type Config struct {
@@ -22,13 +24,15 @@ type Config struct {
 	DailySummaryTime           string
 	HTTPTimeout                time.Duration
 	LLMMaxCompletionTokens     int
-	MCPServers                 map[string]MCPServerEntry
+	LLMRetryBackoffMultiplier  float64
+	MCPServers                 map[string]mcpclient.MCPServerEntry
 	MCPConfigWarnings          []string
 	MetricsAddr                string
+	LLMPromptsFile             string
 }
 
 func FromEnv() (Config, error) {
-	mcpServers, mcpWarnings := LoadMCPServersFromFile()
+	mcpServers, mcpWarnings := mcpclient.LoadMCPServersFromFile()
 	cfg := Config{
 		DBPath:                     env("ASSISTANT_BOT_DB_PATH", "/data/assistantbot.db"),
 		DBEncryptionKey:            os.Getenv("ASSISTANT_BOT_DB_KEY"),
@@ -43,9 +47,11 @@ func FromEnv() (Config, error) {
 		DailySummaryTime:           env("DAILY_SUMMARY_TIME", "03:00"),
 		HTTPTimeout:                time.Duration(envInt("HTTP_TIMEOUT_SECONDS", 30)) * time.Second,
 		LLMMaxCompletionTokens:     llmMaxCompletionTokens(),
+		LLMRetryBackoffMultiplier:  llmRetryBackoffMultiplier(),
 		MCPServers:                 mcpServers,
 		MCPConfigWarnings:          mcpWarnings,
 		MetricsAddr:                strings.TrimSpace(os.Getenv("ASSISTANT_BOT_METRICS_ADDR")),
+		LLMPromptsFile:             strings.TrimSpace(os.Getenv("ASSISTANT_BOT_LLM_PROMPTS_FILE")),
 	}
 	return cfg, nil
 }
@@ -57,6 +63,9 @@ func (c Config) ValidateRun() error {
 	}
 	if c.LLMAPIKey == "" {
 		missing = append(missing, "LLM_API_KEY")
+	}
+	if c.LLMPromptsFile == "" {
+		missing = append(missing, "ASSISTANT_BOT_LLM_PROMPTS_FILE")
 	}
 	return c.validate(missing)
 }
@@ -98,6 +107,20 @@ func envInt(name string, fallback int) int {
 	return value
 }
 
+// AppDebug reports whether APP_DEBUG is enabled (verbose logging, including LLM bodies).
+func AppDebug() bool {
+	return envBool("APP_DEBUG")
+}
+
+func envBool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func llmTaskModels() map[string]string {
 	models := map[string]string{}
 	setTasks := func(model string, tasks ...string) {
@@ -118,6 +141,18 @@ func llmTaskModels() map[string]string {
 	setTasks(os.Getenv("LLM_MODEL_PROFILE_UPDATE"), "update_participant_profile")
 	setTasks(os.Getenv("LLM_MODEL_PROFILE_REBUILD"), "rebuild_participant_profile")
 	return models
+}
+
+func llmRetryBackoffMultiplier() float64 {
+	raw := strings.TrimSpace(os.Getenv("LLM_RETRY_BACKOFF_MULTIPLIER"))
+	if raw == "" {
+		return 2
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value < 1 {
+		return 2
+	}
+	return value
 }
 
 func llmMaxCompletionTokens() int {

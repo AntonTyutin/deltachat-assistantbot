@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AntonTyutin/assistantbot-core/transport"
 	chatmail "github.com/chatmail/rpc-client-go/v2/deltachat"
 )
 
@@ -43,7 +44,7 @@ func (c *RPCClient) ConfiguredAccountAddr(ctx context.Context) (string, error) {
 	return configuredAccountAddr(rpc, accountID)
 }
 
-func (c *RPCClient) Run(ctx context.Context, handler EventHandler) error {
+func (c *RPCClient) Run(ctx context.Context, handlers EventHandlers) error {
 	rpc, transport, err := openRPC(ctx, c.accountsPath, c.serverCmd)
 	if err != nil {
 		return err
@@ -63,26 +64,26 @@ func (c *RPCClient) Run(ctx context.Context, handler EventHandler) error {
 	runErr := make(chan error, 1)
 
 	bot.OnNewMsg(func(bot *chatmail.Bot, accID uint32, msgID uint32) {
-		c.handleMessageEvent(ctx, bot, handlerErr, handler, MessageEventNew, accID, msgID)
+		c.handleMessageEvent(ctx, bot, handlerErr, handlers.OnNewMessage, accID, msgID)
 	})
 	bot.On(&chatmail.EventTypeMsgsChanged{}, func(bot *chatmail.Bot, accID uint32, event chatmail.EventType) {
 		changed, ok := event.(*chatmail.EventTypeMsgsChanged)
 		if !ok || changed.MsgId == 0 {
 			return
 		}
-		c.handleMessageEvent(ctx, bot, handlerErr, handler, MessageEventUpdated, accID, changed.MsgId)
+		c.handleMessageEvent(ctx, bot, handlerErr, handlers.OnMessageUpdated, accID, changed.MsgId)
 	})
 	bot.On(&chatmail.EventTypeMsgDeleted{}, func(bot *chatmail.Bot, accID uint32, event chatmail.EventType) {
 		deleted, ok := event.(*chatmail.EventTypeMsgDeleted)
 		if !ok {
 			return
 		}
-		msgEvent := MessageEvent{
-			Kind:      MessageEventDeleted,
-			ChatID:    strconv.FormatUint(uint64(deleted.ChatId), 10),
-			MessageID: strconv.FormatUint(uint64(deleted.MsgId), 10),
+		if handlers.OnMessageDeleted == nil {
+			return
 		}
-		if err := handler(ctx, msgEvent); err != nil {
+		chatID := strconv.FormatUint(uint64(deleted.ChatId), 10)
+		messageID := strconv.FormatUint(uint64(deleted.MsgId), 10)
+		if err := handlers.OnMessageDeleted(ctx, chatID, messageID); err != nil {
 			reportHandlerError(bot, handlerErr, err)
 		}
 	})
@@ -91,7 +92,7 @@ func (c *RPCClient) Run(ctx context.Context, handler EventHandler) error {
 		if !ok {
 			return
 		}
-		c.handleLocationChangedEvent(ctx, bot, handlerErr, handler, accID, changed.ContactId)
+		c.handleLocationChangedEvent(ctx, bot, handlerErr, handlers.OnLocationUpdated, accID, changed.ContactId)
 	})
 
 	go func() {
@@ -110,26 +111,27 @@ func (c *RPCClient) Run(ctx context.Context, handler EventHandler) error {
 	}
 }
 
-func (c *RPCClient) handleMessageEvent(ctx context.Context, bot *chatmail.Bot, handlerErr chan<- error, handler EventHandler, kind MessageEventKind, accID uint32, msgID uint32) {
+func (c *RPCClient) handleMessageEvent(ctx context.Context, bot *chatmail.Bot, handlerErr chan<- error, handler func(context.Context, Message) error, accID uint32, msgID uint32) {
+	if handler == nil {
+		return
+	}
 	message, err := c.loadMessage(accID, msgID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skip deltachat message event: account_id=%d msg_id=%d kind=%s error=%v\n", accID, msgID, kind, err)
+		fmt.Fprintf(os.Stderr, "skip deltachat message event: account_id=%d msg_id=%d error=%v\n", accID, msgID, err)
 		return
 	}
 	if message.SenderID == "" {
 		return
 	}
-	if err := handler(ctx, MessageEvent{
-		Kind:      kind,
-		Message:   message,
-		ChatID:    message.ChatID,
-		MessageID: message.ID,
-	}); err != nil {
+	if err := handler(ctx, message); err != nil {
 		reportHandlerError(bot, handlerErr, err)
 	}
 }
 
-func (c *RPCClient) handleLocationChangedEvent(ctx context.Context, bot *chatmail.Bot, handlerErr chan<- error, handler EventHandler, accID uint32, contactID *uint32) {
+func (c *RPCClient) handleLocationChangedEvent(ctx context.Context, bot *chatmail.Bot, handlerErr chan<- error, handler LocationUpdatedHandler, accID uint32, contactID *uint32) {
+	if handler == nil {
+		return
+	}
 	locations, err := c.rpc.GetLocations(accID, nil, contactID, 0, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skip deltachat location changed event: account_id=%d error=%v\n", accID, err)
@@ -138,13 +140,8 @@ func (c *RPCClient) handleLocationChangedEvent(ctx context.Context, bot *chatmai
 	for _, location := range latestLocationsByContact(locations, contactID) {
 		lat := location.Latitude
 		lon := location.Longitude
-		event := MessageEvent{
-			Kind:          MessageEventLocationUpdate,
-			ParticipantID: strconv.FormatUint(uint64(location.ContactId), 10),
-			Latitude:      &lat,
-			Longitude:     &lon,
-		}
-		if err := handler(ctx, event); err != nil {
+		participantID := strconv.FormatUint(uint64(location.ContactId), 10)
+		if err := handler(ctx, participantID, lat, lon); err != nil {
 			reportHandlerError(bot, handlerErr, err)
 			return
 		}
@@ -221,6 +218,41 @@ func (c *RPCClient) SendText(ctx context.Context, message OutboundMessage) (stri
 		return "", err
 	}
 	return strconv.FormatUint(uint64(messageID), 10), nil
+}
+
+func (c *RPCClient) EditMessage(context.Context, MessageEdit) error {
+	return transport.UnsupportedCapabilityError{
+		Capability: transport.CapabilityEditMessage,
+		Transport:  "deltachat",
+	}
+}
+
+func (c *RPCClient) DeleteMessage(context.Context, string, string) error {
+	return transport.UnsupportedCapabilityError{
+		Capability: transport.CapabilityDeleteMessage,
+		Transport:  "deltachat",
+	}
+}
+
+func (c *RPCClient) React(context.Context, MessageReaction) error {
+	return transport.UnsupportedCapabilityError{
+		Capability: transport.CapabilityReact,
+		Transport:  "deltachat",
+	}
+}
+
+func (c *RPCClient) SetTyping(context.Context, TypingState) error {
+	return transport.UnsupportedCapabilityError{
+		Capability: transport.CapabilityTyping,
+		Transport:  "deltachat",
+	}
+}
+
+func (c *RPCClient) SendMedia(context.Context, MediaMessage) (string, error) {
+	return "", transport.UnsupportedCapabilityError{
+		Capability: transport.CapabilitySendMedia,
+		Transport:  "deltachat",
+	}
 }
 
 // rpcMessagePayload loads get_message JSON without chatmail.Message's custom

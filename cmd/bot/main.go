@@ -4,29 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/spf13/cobra"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/spf13/cobra"
-
-	"assistantbot/internal/app"
 	"assistantbot/internal/config"
 	"assistantbot/internal/deltachat"
-	"assistantbot/internal/llm"
-	"assistantbot/internal/mcpclient"
-	"assistantbot/internal/memory"
-	"assistantbot/internal/metrics"
-	"assistantbot/internal/reply"
-	"assistantbot/internal/scheduler"
-	"assistantbot/internal/storage"
-	"assistantbot/internal/version"
+	"assistantbot/internal/runner"
 )
 
 func main() {
@@ -182,120 +169,14 @@ func runEditProfile(ctx context.Context, cfg config.Config, update deltachat.Bot
 }
 
 func runBot(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
-	if err := cfg.ValidateRun(); err != nil {
+	bot, cleanup, err := runner.NewFromConfig(ctx, cfg, logger)
+	if err != nil {
 		return err
 	}
-
-	for _, w := range cfg.MCPConfigWarnings {
-		logger.Warn("mcp configuration", "detail", w)
-	}
-
-	store, err := storage.Open(ctx, cfg.DBPath, cfg.DBEncryptionKey)
-	if err != nil {
-		return fmt.Errorf("open storage: %w", err)
-	}
-	defer store.Close()
-
-	deltaClient := deltachat.NewRPCClient(cfg.DeltaChatRPCServerCmd, cfg.DeltaChatAccountsPath)
-	metricsBotID := metricsBotIDFallback()
-	if accountAddr, err := deltaClient.ConfiguredAccountAddr(ctx); err != nil {
-		logger.Warn("could not resolve bot account address for metrics bot_id; using hostname", "error", err, "bot_id", metricsBotID)
-	} else {
-		metricsBotID = accountAddr
-	}
-
-	recorder := metrics.Noop
-	if addr := strings.TrimSpace(cfg.MetricsAddr); addr != "" {
-		reg := prometheus.NewRegistry()
-		recorder = metrics.NewPrometheus(reg, metricsBotID, version.Version)
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{EnableOpenMetrics: true}))
-		srv := &http.Server{
-			Addr:    addr,
-			Handler: mux,
-		}
-		go func() {
-			logger.Info("metrics server listening", "addr", addr, "path", "/metrics")
-			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				logger.Error("metrics server exited", "error", err)
-			}
-		}()
-		go func() {
-			<-ctx.Done()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := srv.Shutdown(shutdownCtx); err != nil {
-				logger.Error("metrics server shutdown", "error", err)
-			}
-		}()
-	}
-
-	llmClient := llm.NewOpenRouterClient(
-		cfg.LLMBaseURL,
-		cfg.LLMAPIKey,
-		cfg.LLMModel,
-		cfg.LLMTaskModels,
-		cfg.LLMTaskMaxCompletionTokens,
-		cfg.HTTPTimeout,
-		cfg.LLMMaxCompletionTokens,
-		logger,
-		llm.WithRecorder(recorder),
-	)
-
-	var mcpReg *mcpclient.Registry
-	if len(cfg.MCPServers) > 0 {
-		logger.Info("connecting mcp servers", "count", len(cfg.MCPServers))
-		httpClient := &http.Client{Timeout: cfg.HTTPTimeout}
-		connectCtx, cancel := context.WithTimeout(ctx, cfg.HTTPTimeout)
-		var connectWarnings []string
-		mcpReg, connectWarnings = mcpclient.Connect(connectCtx, cfg.MCPServers, httpClient, recorder)
-		cancel()
-		for _, w := range connectWarnings {
-			logger.Warn("mcp connection", "detail", w)
-		}
-		if mcpReg != nil {
-			defer mcpReg.Close()
-		}
-	}
-
-	memoryPipeline := memory.NewPipeline(store, llmClient, mcpReg)
-	replyService := reply.NewService(store, llmClient, cfg.BotNames, mcpReg, logger, recorder)
-	bot := app.New(deltaClient, store, memoryPipeline, replyService, logger, recorder)
-
-	go func() {
-		err := scheduler.RunDaily(ctx, cfg.DailySummaryTime, logger, func(ctx context.Context, date time.Time) error {
-			chats, err := store.ListChats(ctx)
-			if err != nil {
-				return err
-			}
-			for _, chat := range chats {
-				if err := memoryPipeline.UpdateDailySummary(ctx, chat.ID, date); err != nil {
-					logger.Error("chat daily summary failed", "chat_id", chat.ID, "error", err)
-				}
-			}
-			return nil
-		})
-		if err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("scheduler stopped", "error", err)
-		}
-	}()
-
-	logger.Info("Assistant Bot started", "db_path", cfg.DBPath, "model", cfg.LLMModel, "account", metricsBotID, "dc_accounts_path", cfg.DeltaChatAccountsPath)
+	defer cleanup()
 	if err := bot.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("deltachat event loop stopped", "error", err)
 		return err
 	}
 	return nil
-}
-
-func metricsBotIDFallback() string {
-	host, err := os.Hostname()
-	if err != nil {
-		return "unknown"
-	}
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return "unknown"
-	}
-	return host
 }

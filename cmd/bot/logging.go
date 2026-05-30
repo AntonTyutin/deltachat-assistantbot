@@ -5,21 +5,28 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/AntonTyutin/assistantbot-core/tracing"
 	"github.com/mattn/go-isatty"
 
+	"assistantbot/internal/config"
 	"assistantbot/internal/version"
 )
 
 // Application logs go to stderr in service mode (no TTY) so Docker captures them
 // immediately. Interactive CLI commands keep stderr for user-facing errors only.
 func newLogger() *slog.Logger {
+	level := slog.LevelInfo
+	if config.AppDebug() {
+		level = slog.LevelDebug
+	}
 	var w io.Writer = io.Discard
-	if serviceLogging() {
+	if serviceLogging() || config.AppDebug() {
 		w = syncWriter{os.Stderr}
 	}
-	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	})).With("version", version.Version)
+	handler := tracing.NewHandler(slog.NewJSONHandler(w, &slog.HandlerOptions{
+		Level: level,
+	}))
+	return slog.New(handler).With("version", version.Version)
 }
 
 func serviceLogging() bool {
