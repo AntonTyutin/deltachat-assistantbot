@@ -3,26 +3,18 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	openai "github.com/sashabaranov/go-openai"
+
 	"github.com/AntonTyutin/assistantbot-core/llm"
-	"github.com/AntonTyutin/assistantbot-core/llm/prompts"
-	"github.com/AntonTyutin/assistantbot-core/memory"
-	"github.com/AntonTyutin/assistantbot-core/reply"
-	"github.com/AntonTyutin/assistantbot-core/storage"
 )
 
 func TestStartMessageProcessingIsAsync(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := openTestStore(t)
 	defer store.Close()
 
 	gate := make(chan struct{})
@@ -30,21 +22,15 @@ func TestStartMessageProcessingIsAsync(t *testing.T) {
 	messenger := &someMessengerClient{sentID: "25", sentDone: make(chan struct{}, 1)}
 	llmClient := &gatedLLM{
 		StaticClient: llm.StaticClient{Responses: map[string]json.RawMessage{
-			"update_participant_profile": json.RawMessage(`{"names":{"chat":"Anton"}}`),
-			"update_chat_topic":          json.RawMessage(`{"title":"date","summary":"date question","active_participants":["user-1"]}`),
-			"generate_chat_reply":        json.RawMessage(`{"reply":"ok"}`),
+			llm.TaskUpdateProfile:        json.RawMessage(`{"names":{"chat":"Anton"}}`),
+			llm.TaskClassifyMessageTopic: json.RawMessage(`{"is_new_topic":true,"title":"date","summary":"date question"}`),
+			llm.TaskUpdateTopic:          json.RawMessage(`{"title":"date","summary":"date question","active_participants":["user-1"]}`),
+			llm.TaskGenerateChatReply:    json.RawMessage(`{"reply":"ok"}`),
 		}},
 		gate:         gate,
 		replyStarted: replyStarted,
 	}
-	app := New(
-		messenger,
-		store,
-		memory.NewPipeline(store, llmClient, nil, prompts.FixedTestRegistry()),
-		reply.NewService(store, llmClient, prompts.FixedTestRegistry(), []string{"чатик"}, nil, nil, nil),
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-	)
+	app := buildTestApp(messenger, store, llmClient, []string{"чатик"})
 
 	start := time.Now()
 	app.startMessageProcessing(ctx, botAddressedMessage())
@@ -69,32 +55,23 @@ func TestStartMessageProcessingIsAsync(t *testing.T) {
 
 func TestDeleteDuringReplySkipsSend(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := openTestStore(t)
 	defer store.Close()
 
 	gate := make(chan struct{})
 	replyStarted := make(chan struct{}, 1)
 	llmClient := &gatedLLM{
 		StaticClient: llm.StaticClient{Responses: map[string]json.RawMessage{
-			"update_participant_profile": json.RawMessage(`{"names":{"chat":"Anton"}}`),
-			"update_chat_topic":          json.RawMessage(`{"title":"date","summary":"date question","active_participants":["user-1"]}`),
-			"generate_chat_reply":        json.RawMessage(`{"reply":"should not send"}`),
+			llm.TaskUpdateProfile:        json.RawMessage(`{"names":{"chat":"Anton"}}`),
+			llm.TaskClassifyMessageTopic: json.RawMessage(`{"is_new_topic":true,"title":"date","summary":"date question"}`),
+			llm.TaskUpdateTopic:          json.RawMessage(`{"title":"date","summary":"date question","active_participants":["user-1"]}`),
+			llm.TaskGenerateChatReply:    json.RawMessage(`{"reply":"should not send"}`),
 		}},
 		gate:         gate,
 		replyStarted: replyStarted,
 	}
 	messenger := &someMessengerClient{sentID: "99"}
-	app := New(
-		messenger,
-		store,
-		memory.NewPipeline(store, llmClient, nil, prompts.FixedTestRegistry()),
-		reply.NewService(store, llmClient, prompts.FixedTestRegistry(), []string{"чатик"}, nil, nil, nil),
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-	)
+	app := buildTestApp(messenger, store, llmClient, []string{"чатик"})
 
 	msg := botAddressedMessage()
 	procCtx, release, state := app.processor.begin(ctx, msg)
@@ -130,10 +107,7 @@ func TestDeleteDuringReplySkipsSend(t *testing.T) {
 
 func TestUpdateDuringReplyRetriesWithEditedText(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := openTestStore(t)
 	defer store.Close()
 
 	var generateCalls atomic.Int32
@@ -141,28 +115,22 @@ func TestUpdateDuringReplyRetriesWithEditedText(t *testing.T) {
 	replyStarted := make(chan struct{}, 2)
 	gated := &gatedLLM{
 		StaticClient: llm.StaticClient{Responses: map[string]json.RawMessage{
-			"update_participant_profile": json.RawMessage(`{"names":{"chat":"Anton"}}`),
-			"update_chat_topic":          json.RawMessage(`{"title":"date","summary":"date question","active_participants":["user-1"]}`),
-			"generate_chat_reply":        json.RawMessage(`{"reply":"first"}`),
+			llm.TaskUpdateProfile:        json.RawMessage(`{"names":{"chat":"Anton"}}`),
+			llm.TaskClassifyMessageTopic: json.RawMessage(`{"is_new_topic":true,"title":"date","summary":"date question"}`),
+			llm.TaskUpdateTopic:          json.RawMessage(`{"title":"date","summary":"date question","active_participants":["user-1"]}`),
+			llm.TaskGenerateChatReply:    json.RawMessage(`{"reply":"first"}`),
 		}},
 		gate:         gate,
 		replyStarted: replyStarted,
 	}
 	gated.onGenerate = func() {
 		if generateCalls.Add(1) == 2 {
-			gated.Responses["generate_chat_reply"] = json.RawMessage(`{"reply":"second"}`)
+			gated.Responses[llm.TaskGenerateChatReply] = json.RawMessage(`{"reply":"second"}`)
 		}
 	}
 	llmClient := gated
 	messenger := &someMessengerClient{sentID: "99"}
-	app := New(
-		messenger,
-		store,
-		memory.NewPipeline(store, llmClient, nil, prompts.FixedTestRegistry()),
-		reply.NewService(store, llmClient, prompts.FixedTestRegistry(), []string{"чатик"}, nil, nil, nil),
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-	)
+	app := buildTestApp(messenger, store, llmClient, []string{"чатик"})
 
 	msg := botAddressedMessage()
 	procCtx, release, state := app.processor.begin(ctx, msg)
@@ -213,24 +181,40 @@ type gatedLLM struct {
 }
 
 func (c *gatedLLM) CompleteJSON(ctx context.Context, task string, input any, schema string) (json.RawMessage, error) {
-	if task == "generate_chat_reply" {
-		if c.onGenerate != nil {
-			c.onGenerate()
-		}
-		if c.replyStarted != nil {
-			select {
-			case c.replyStarted <- struct{}{}:
-			default:
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-c.gate:
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	if task == llm.TaskGenerateChatReply {
+		if err := c.waitForGenerateGate(ctx); err != nil {
+			return nil, err
 		}
 	}
 	return c.StaticClient.CompleteJSON(ctx, task, input, schema)
+}
+
+func (c *gatedLLM) ChatWithTools(ctx context.Context, task string, messages []openai.ChatCompletionMessage, tools []llm.ToolDefinition, exec llm.ToolExecutorFunc) (string, error) {
+	if task == llm.TaskGenerateChatReply {
+		if err := c.waitForGenerateGate(ctx); err != nil {
+			return "", err
+		}
+	}
+	return c.StaticClient.ChatWithTools(ctx, task, messages, tools, exec)
+}
+
+func (c *gatedLLM) waitForGenerateGate(ctx context.Context) error {
+	if c.onGenerate != nil {
+		c.onGenerate()
+	}
+	if c.replyStarted != nil {
+		select {
+		case c.replyStarted <- struct{}{}:
+		default:
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.gate:
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return nil
 }

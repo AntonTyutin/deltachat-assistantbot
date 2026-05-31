@@ -5,9 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -15,39 +12,26 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 
 	"github.com/AntonTyutin/assistantbot-core/llm"
-	"github.com/AntonTyutin/assistantbot-core/llm/prompts"
-	"github.com/AntonTyutin/assistantbot-core/memory"
-	"github.com/AntonTyutin/assistantbot-core/reply"
-	"github.com/AntonTyutin/assistantbot-core/storage"
 	"github.com/AntonTyutin/assistantbot-core/transport"
 )
 
 func TestHandleMessageSendsFallbackWhenLLMExhausted(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := openTestStore(t)
 	defer store.Close()
 
 	llmClient := taskFailClient{
 		StaticClient: llm.StaticClient{Responses: map[string]json.RawMessage{
-			"update_participant_profile": json.RawMessage(`{"names":{"chat":"Anton"}}`),
-			"update_chat_topic":          json.RawMessage(`{"title":"date","summary":"date question","active_participants":["user-1"]}`),
+			llm.TaskUpdateProfile:        json.RawMessage(`{"names":{"chat":"Anton"}}`),
+			llm.TaskClassifyMessageTopic: json.RawMessage(`{"is_new_topic":true,"title":"date","summary":"date question"}`),
+			llm.TaskUpdateTopic:          json.RawMessage(`{"title":"date","summary":"date question","active_participants":["user-1"]}`),
 		}},
 		failTask: llm.TaskGenerateChatReply,
 	}
 	messenger := &someMessengerClient{sentID: "25"}
-	app := New(
-		messenger,
-		store,
-		memory.NewPipeline(store, llmClient, nil, prompts.FixedTestRegistry()),
-		reply.NewService(store, llmClient, prompts.FixedTestRegistry(), []string{"чатик"}, nil, nil, nil),
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-	)
+	app := buildTestApp(messenger, store, llmClient, []string{"чатик"})
 
-	err = app.HandleMessage(ctx, botAddressedMessage())
+	err := app.HandleMessage(ctx, botAddressedMessage())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,29 +48,21 @@ func TestHandleMessageSendsFallbackWhenLLMExhausted(t *testing.T) {
 
 func TestHandleMessageRepliesDespiteBackgroundMemoryError(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := openTestStore(t)
 	defer store.Close()
 
 	llmClient := taskFailClient{
 		StaticClient: llm.StaticClient{Responses: map[string]json.RawMessage{
-			"generate_chat_reply": json.RawMessage(`{"reply":"ok despite memory error"}`),
+			llm.TaskClassifyMessageTopic: json.RawMessage(`{"is_new_topic":true,"title":"date","summary":"date question"}`),
+			llm.TaskGenerateChatReply:    json.RawMessage(`{"reply":"ok despite memory error"}`),
+			llm.TaskUpdateProfile:        json.RawMessage(`{"city":"","address":"","style":"","verbosity":"","expertise":{},"interests":[]}`),
 		}},
-		failTask: "update_chat_topic",
+		failTask: llm.TaskUpdateProfile,
 	}
 	messenger := &someMessengerClient{sentID: "25"}
-	app := New(
-		messenger,
-		store,
-		memory.NewPipeline(store, llmClient, nil, prompts.FixedTestRegistry()),
-		reply.NewService(store, llmClient, prompts.FixedTestRegistry(), []string{"чатик"}, nil, nil, nil),
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-	)
+	app := buildTestApp(messenger, store, llmClient, []string{"чатик"})
 
-	err = app.HandleMessage(ctx, botAddressedMessage())
+	err := app.HandleMessage(ctx, botAddressedMessage())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,28 +76,19 @@ func TestHandleMessageRepliesDespiteBackgroundMemoryError(t *testing.T) {
 
 func TestHandleMessageStoresSentReplyInMemory(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := openTestStore(t)
 	defer store.Close()
 
 	llmClient := llm.StaticClient{Responses: map[string]json.RawMessage{
-		"update_participant_profile": json.RawMessage(`{"names":{"chat":"Anton"}}`),
-		"update_chat_topic":          json.RawMessage(`{"title":"date","summary":"date question","active_participants":["user-1"]}`),
-		"generate_chat_reply":        json.RawMessage(`{"reply":"Сегодня 27 апреля 2026 года."}`),
+		llm.TaskUpdateProfile:        json.RawMessage(`{"names":{"chat":"Anton"}}`),
+		llm.TaskClassifyMessageTopic: json.RawMessage(`{"is_new_topic":true,"title":"date","summary":"date question"}`),
+		llm.TaskUpdateTopic:          json.RawMessage(`{"title":"date","summary":"date question","active_participants":["user-1"]}`),
+		llm.TaskGenerateChatReply:    json.RawMessage(`{"reply":"Сегодня 27 апреля 2026 года."}`),
 	}}
 	messenger := &someMessengerClient{sentID: "25"}
-	app := New(
-		messenger,
-		store,
-		memory.NewPipeline(store, llmClient, nil, prompts.FixedTestRegistry()),
-		reply.NewService(store, llmClient, prompts.FixedTestRegistry(), []string{"чатик"}, nil, nil, nil),
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-	)
+	app := buildTestApp(messenger, store, llmClient, []string{"чатик"})
 
-	err = app.HandleMessage(ctx, transport.Message{
+	err := app.HandleMessage(ctx, transport.Message{
 		ID:       "24",
 		ChatID:   "10",
 		SenderID: "user-1",
@@ -154,10 +121,7 @@ func TestHandleMessageStoresSentReplyInMemory(t *testing.T) {
 
 func TestHandleMessageUpdateDuringReplyUsesLatestRevision(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := openTestStore(t)
 	defer store.Close()
 
 	llmClient := &scriptedLLMClient{
@@ -169,14 +133,7 @@ func TestHandleMessageUpdateDuringReplyUsesLatestRevision(t *testing.T) {
 		generateStarted: make(chan struct{}, 1),
 	}
 	messenger := &someMessengerClient{sentID: "25", sentDone: make(chan struct{}, 4)}
-	app := New(
-		messenger,
-		store,
-		memory.NewPipeline(store, llmClient, nil, prompts.FixedTestRegistry()),
-		reply.NewService(store, llmClient, prompts.FixedTestRegistry(), []string{"чатик"}, nil, nil, nil),
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-	)
+	app := buildTestApp(messenger, store, llmClient, []string{"чатик"})
 
 	app.startMessageProcessing(ctx, transport.Message{
 		ID:       "24",
@@ -213,10 +170,7 @@ func TestHandleMessageUpdateDuringReplyUsesLatestRevision(t *testing.T) {
 
 func TestHandleMessageDeleteDuringReplySkipsSend(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := openTestStore(t)
 	defer store.Close()
 
 	llmClient := &scriptedLLMClient{
@@ -227,14 +181,7 @@ func TestHandleMessageDeleteDuringReplySkipsSend(t *testing.T) {
 		generateStarted: make(chan struct{}, 1),
 	}
 	messenger := &someMessengerClient{sentID: "25", sentDone: make(chan struct{}, 2)}
-	app := New(
-		messenger,
-		store,
-		memory.NewPipeline(store, llmClient, nil, prompts.FixedTestRegistry()),
-		reply.NewService(store, llmClient, prompts.FixedTestRegistry(), []string{"чатик"}, nil, nil, nil),
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-	)
+	app := buildTestApp(messenger, store, llmClient, []string{"чатик"})
 
 	app.startMessageProcessing(ctx, transport.Message{
 		ID:       "24",
@@ -256,12 +203,48 @@ func TestHandleMessageDeleteDuringReplySkipsSend(t *testing.T) {
 	}
 }
 
-func TestHandleMessageMultipleUpdatesSendsOnlyLatest(t *testing.T) {
+func TestHandleMessageDeletedRemovesStoredMessage(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
+	store := openTestStore(t)
+	defer store.Close()
+	app := buildTestApp(&someMessengerClient{}, store, testLLMClient(nil), nil)
+
+	msg := transport.Message{
+		ID:       "24",
+		ChatID:   "10",
+		SenderID: "user-1",
+		Sender:   "Anton",
+		Text:     "hello",
+		IsGroup:  true,
+		SentAt:   time.Now(),
+	}
+	if _, err := app.memory.PrepareForReply(ctx, msg); err != nil {
 		t.Fatal(err)
 	}
+	if _, ok, err := store.GetMessage(ctx, "10", "24"); err != nil || !ok {
+		t.Fatalf("message not stored: ok=%v err=%v", ok, err)
+	}
+
+	if err := app.handleMessageDeleted(ctx, "10", "24"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, ok, err := store.GetMessage(ctx, "10", "24")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("message still present after delete")
+}
+
+func TestHandleMessageMultipleUpdatesSendsOnlyLatest(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
 	defer store.Close()
 
 	llmClient := &scriptedLLMClient{
@@ -274,14 +257,7 @@ func TestHandleMessageMultipleUpdatesSendsOnlyLatest(t *testing.T) {
 		generateStarted: make(chan struct{}, 1),
 	}
 	messenger := &someMessengerClient{sentID: "25", sentDone: make(chan struct{}, 4)}
-	app := New(
-		messenger,
-		store,
-		memory.NewPipeline(store, llmClient, nil, prompts.FixedTestRegistry()),
-		reply.NewService(store, llmClient, prompts.FixedTestRegistry(), []string{"чатик"}, nil, nil, nil),
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-	)
+	app := buildTestApp(messenger, store, llmClient, []string{"чатик"})
 
 	app.startMessageProcessing(ctx, transport.Message{
 		ID:       "24",
@@ -329,10 +305,7 @@ func TestHandleMessageMultipleUpdatesSendsOnlyLatest(t *testing.T) {
 
 func TestStartMessageProcessingDuplicateMessageIDKeepsLatestRun(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := openTestStore(t)
 	defer store.Close()
 
 	llmClient := &scriptedLLMClient{
@@ -344,14 +317,7 @@ func TestStartMessageProcessingDuplicateMessageIDKeepsLatestRun(t *testing.T) {
 		generateStarted: make(chan struct{}, 1),
 	}
 	messenger := &someMessengerClient{sentID: "25", sentDone: make(chan struct{}, 4)}
-	app := New(
-		messenger,
-		store,
-		memory.NewPipeline(store, llmClient, nil, prompts.FixedTestRegistry()),
-		reply.NewService(store, llmClient, prompts.FixedTestRegistry(), []string{"чатик"}, nil, nil, nil),
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-	)
+	app := buildTestApp(messenger, store, llmClient, []string{"чатик"})
 
 	app.startMessageProcessing(ctx, transport.Message{
 		ID:       "24",
@@ -394,40 +360,50 @@ type scriptedLLMClient struct {
 
 func (c *scriptedLLMClient) CompleteJSON(ctx context.Context, task string, input any, schema string) (json.RawMessage, error) {
 	switch task {
-	case "update_participant_profile":
+	case llm.TaskUpdateProfile:
 		return json.RawMessage(`{"city":"","address":"","style":"","verbosity":"","expertise":{},"interests":[]}`), nil
-	case "update_chat_topic", "rebuild_chat_topic":
+	case llm.TaskClassifyMessageTopic:
+		return json.RawMessage(`{"is_new_topic":true,"title":"topic","summary":"summary"}`), nil
+	case llm.TaskUpdateTopic:
 		return json.RawMessage(`{"title":"topic","summary":"summary","decisions":[],"open_questions":[],"active_participants":["user-1"]}`), nil
-	case "rebuild_participant_profile":
-		return json.RawMessage(`{"names":{"self":"Anton"},"city":"","address":"","style":"","verbosity":"","expertise":{},"interests":[]}`), nil
-	case "generate_chat_reply":
-		c.mu.Lock()
-		shouldBlock := c.blockFirstGenerate && !c.generateBlocked
-		if shouldBlock {
-			c.generateBlocked = true
-		}
-		started := c.generateStarted
-		c.mu.Unlock()
-		if shouldBlock {
-			if started != nil {
-				select {
-				case started <- struct{}{}:
-				default:
-				}
-			}
-			<-ctx.Done()
-			return nil, ctx.Err()
-		}
-		text := extractMessageText(input)
-		replyText := c.replyForText(text)
-		return json.RawMessage(fmt.Sprintf(`{"reply":%q}`, replyText)), nil
+	case llm.TaskGenerateChatReply:
+		return c.generateReplyJSON(ctx, extractMessageText(input))
 	default:
 		return json.RawMessage(`{}`), nil
 	}
 }
 
-func (c *scriptedLLMClient) ChatWithTools(ctx context.Context, task string, messages []openai.ChatCompletionMessage, tools []llm.ToolDefinition, exec llm.ToolExecutorFunc) (string, error) {
-	return "", errors.New("not implemented")
+func (c *scriptedLLMClient) ChatWithTools(ctx context.Context, task string, messages []openai.ChatCompletionMessage, _ []llm.ToolDefinition, _ llm.ToolExecutorFunc) (string, error) {
+	if task != llm.TaskGenerateChatReply {
+		return "", errors.New("not implemented")
+	}
+	raw, err := c.generateReplyJSON(ctx, extractMessageTextFromChat(messages))
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func (c *scriptedLLMClient) generateReplyJSON(ctx context.Context, text string) (json.RawMessage, error) {
+	c.mu.Lock()
+	shouldBlock := c.blockFirstGenerate && !c.generateBlocked
+	if shouldBlock {
+		c.generateBlocked = true
+	}
+	started := c.generateStarted
+	c.mu.Unlock()
+	if shouldBlock {
+		if started != nil {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	replyText := c.replyForText(text)
+	return json.RawMessage(fmt.Sprintf(`{"reply":%q}`, replyText)), nil
 }
 
 func (c *scriptedLLMClient) replyForText(text string) string {
@@ -440,6 +416,24 @@ func (c *scriptedLLMClient) replyForText(text string) string {
 		return replyText
 	}
 	return "ok"
+}
+
+func extractMessageTextFromChat(messages []openai.ChatCompletionMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != openai.ChatMessageRoleUser {
+			continue
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(messages[i].Content), &payload); err != nil {
+			continue
+		}
+		var message transport.Message
+		if err := json.Unmarshal(payload["message"], &message); err != nil {
+			continue
+		}
+		return message.Text
+	}
+	return ""
 }
 
 func extractMessageText(input any) string {

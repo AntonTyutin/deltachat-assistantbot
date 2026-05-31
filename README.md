@@ -116,7 +116,7 @@ Each bot instance runs its own RPC server subprocess and supports exactly one ac
 `ASSISTANT_BOT_LLM_PROMPTS_FILE` points to a YAML file with system prompts (required to run the bot). Top-level keys:
 
 - `default` — fallback prompt for any task without its own key
-- optional task ids: `generate_chat_reply`, `update_participant_profile`, `rebuild_participant_profile`, `update_chat_topic`, `rebuild_chat_topic`, `daily_summary` (each replaces `default` when set)
+- optional task ids: `generate_chat_reply`, `update_participant_profile`, `update_chat_topic`, `classify_message_topic` (each replaces `default` when set)
 
 Use YAML multiline blocks (`|`) for long prompts and examples. See [`config/llm-prompts.example.yaml`](config/llm-prompts.example.yaml).
 
@@ -131,10 +131,7 @@ On failure the client retries with another random pick (possibly the same model)
 Task-specific variables (same fallback-list format):
 
 - `LLM_MODEL_REPLY` — user-facing replies
-- `LLM_MODEL_SUMMARY` — daily summaries
-- `LLM_MODEL_TOPIC` — topic updates and rebuilds
-- `LLM_MODEL_PROFILE` — participant profile updates and rebuilds
+- `LLM_MODEL_TOPIC` — topic updates and classification
+- `LLM_MODEL_PROFILE` — participant profile updates
 
-Fine-grained overrides: `LLM_MODEL_TOPIC_UPDATE`, `LLM_MODEL_TOPIC_REBUILD`, `LLM_MODEL_PROFILE_UPDATE`, `LLM_MODEL_PROFILE_REBUILD`.
-
-Token limits: `LLM_MAX_COMPLETION_TOKENS` and per-task `LLM_MAX_COMPLETION_TOKENS_*` variables (see `.env.example`).
+Token limits: `LLM_MAX_COMPLETION_TOKENS` (fallback) and per-task `LLM_MAX_COMPLETION_TOKENS_REPLY`, `LLM_MAX_COMPLETION_TOKENS_TOPIC`, `LLM_MAX_COMPLETION_TOKENS_PROFILE` (see `.env.example`).

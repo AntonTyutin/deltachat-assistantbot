@@ -83,7 +83,7 @@ func TestLoadFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reg.SystemPrompt(TaskDailySummary) != "from file" {
-		t.Fatalf("got %q", reg.SystemPrompt(TaskDailySummary))
+	if reg.SystemPrompt(TaskClassifyMessageTopic) != "from file" {
+		t.Fatalf("got %q", reg.SystemPrompt(TaskClassifyMessageTopic))
 	}
 }

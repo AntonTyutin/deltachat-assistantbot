@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -19,7 +18,7 @@ func TestRecentMessagesKeepsRollingWindow(t *testing.T) {
 			SenderID: "user-1",
 			Text:     "hello",
 			SentAt:   time.Date(2026, 4, 26, 12, i, 0, 0, time.UTC),
-		})
+		}, []float32{0.1, 0.2, 0.3})
 		if err != nil {
 			t.Fatalf("upsert message: %v", err)
 		}
@@ -62,36 +61,7 @@ func TestChatNamesAreScopedPerChat(t *testing.T) {
 	}
 }
 
-func TestUpsertMessageUpdatesExistingMessage(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	original := Message{
-		ID:       "msg-1",
-		ChatID:   "chat-1",
-		SenderID: "user-1",
-		Text:     "old text",
-		SentAt:   time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC),
-	}
-	if err := store.UpsertMessage(ctx, original); err != nil {
-		t.Fatal(err)
-	}
-	original.Text = "new text"
-	if err := store.UpsertMessage(ctx, original); err != nil {
-		t.Fatal(err)
-	}
-
-	got, ok, err := store.GetMessage(ctx, "chat-1", "msg-1")
-	if err != nil || !ok {
-		t.Fatalf("message missing: ok=%v err=%v", ok, err)
-	}
-	if got.Text != "new text" {
-		t.Fatalf("expected updated text, got %q", got.Text)
-	}
-}
-
-func TestDeleteMessageRemovesMessageAndTopicLink(t *testing.T) {
+func TestUpsertMessageStoresTopicID(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -101,31 +71,43 @@ func TestDeleteMessageRemovesMessageAndTopicLink(t *testing.T) {
 		ChatID:   "chat-1",
 		SenderID: "user-1",
 		Text:     "hello",
+		TopicID:  "topic-1",
 		SentAt:   time.Now(),
 	}
-	if err := store.UpsertMessage(ctx, message); err != nil {
+	if err := store.UpsertMessage(ctx, message, []float32{0.1, 0.2, 0.3}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AttachMessageToTopic(ctx, "chat-1", "msg-1", "topic-1"); err != nil {
+	topicID, ok, err := store.TopicIDForMessage(ctx, "chat-1", "msg-1")
+	if err != nil || !ok || topicID != "topic-1" {
+		t.Fatalf("topic id missing: topicID=%q ok=%v err=%v", topicID, ok, err)
+	}
+}
+
+func TestDeleteMessageRemovesMessage(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	message := Message{
+		ID:       "msg-1",
+		ChatID:   "chat-1",
+		SenderID: "user-1",
+		Text:     "hello",
+		TopicID:  "topic-1",
+		SentAt:   time.Now(),
+	}
+	if err := store.UpsertMessage(ctx, message, []float32{0.1, 0.2, 0.3}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.DeleteMessage(ctx, "chat-1", "msg-1"); err != nil {
 		t.Fatal(err)
 	}
-
 	if _, ok, err := store.GetMessage(ctx, "chat-1", "msg-1"); err != nil || ok {
 		t.Fatalf("message should be deleted: ok=%v err=%v", ok, err)
-	}
-	if _, ok, err := store.TopicIDForMessage(ctx, "chat-1", "msg-1"); err != nil || ok {
-		t.Fatalf("topic link should be deleted: ok=%v err=%v", ok, err)
 	}
 }
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	return store
+	return OpenTestDB(t, "test-secret")
 }

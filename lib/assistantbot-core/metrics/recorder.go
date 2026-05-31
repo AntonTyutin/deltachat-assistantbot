@@ -10,9 +10,21 @@ const (
 	ReplyPathMCPTools        = "mcp_tools"
 	ReplyPathOpenRouterTools = "openrouter_tools"
 	ReplyPathMixedTools      = "mixed_tools"
-	PhaseMemory              = "memory"
+	PhaseMemoryPrepare       = "memory_prepare"
+	PhaseMemoryBackground    = "memory_background"
+	PhaseMemoryOutbound      = "memory_outbound"
+	PhaseMemoryNewMessage    = "memory_new_message"
+	PhaseMemoryTopicAssign   = "memory_topic_assign"
+	PhaseMemoryMessageUpsert = "memory_message_upsert"
+	PhaseMemoryProfileUpdate = "memory_profile_update"
+	PhaseMemoryProfilePatch  = "memory_profile_patch"
+	PhaseMemoryTopicUpdate   = "memory_topic_update"
+	PhaseMemoryTopicPatch    = "memory_topic_patch"
+	PhaseMemoryDelete        = "memory_delete"
 	PhaseReply               = "reply"
 	PhaseSend                = "send"
+	ToolSourceMemory         = "memory"
+	ToolSourceMCP            = "mcp"
 	// InboundMessageHandleResult labels for RecordInboundMessageHandle.
 	ResultReplied        = "replied"
 	ResultNoReply        = "no_reply"
@@ -45,6 +57,12 @@ type Recorder interface {
 	RecordChatMemoryQueueWait(queue string, dur time.Duration)
 	// RecordChatMemoryTaskDuration records how long the task function ran.
 	RecordChatMemoryTaskDuration(queue string, dur time.Duration)
+
+	// RecordReplyToolCall records one tool invocation during reply generation.
+	// source is ToolSourceMemory or ToolSourceMCP; tool is the function name passed to the LLM.
+	RecordReplyToolCall(source, tool, outcome string, dur time.Duration)
+	// RecordInboundMessageToolCallCount records how many reply-path tool calls of source ran for one inbound message.
+	RecordInboundMessageToolCallCount(source string, count int)
 }
 
 // Noop is a Recorder that discards all events.
@@ -62,3 +80,6 @@ func (noopRecorder) RecordInboundMessageHandle(string, time.Duration)       {}
 func (noopRecorder) RecordChatMemoryQueueDepth(string, int)                 {}
 func (noopRecorder) RecordChatMemoryQueueWait(string, time.Duration)        {}
 func (noopRecorder) RecordChatMemoryTaskDuration(string, time.Duration)     {}
+func (noopRecorder) RecordReplyToolCall(string, string, string, time.Duration) {
+}
+func (noopRecorder) RecordInboundMessageToolCallCount(string, int) {}

@@ -11,40 +11,240 @@ import (
 )
 
 type TopicManager struct {
-	store *storage.Store
-	llm   llm.Client
+	store    *storage.Store
+	llm      llm.Client
+	embedder llm.Embedder
+	cfg      Config
 }
 
-func NewTopicManager(store *storage.Store, llmClient llm.Client) *TopicManager {
-	return &TopicManager{store: store, llm: llmClient}
+func NewTopicManager(store *storage.Store, llmClient llm.Client, embedder llm.Embedder, cfg Config) *TopicManager {
+	return &TopicManager{store: store, llm: llmClient, embedder: embedder, cfg: cfg.withDefaults()}
 }
 
-// ResolveTopicWithoutLLM picks or creates a topic using storage heuristics only (no LLM).
-func (m *TopicManager) ResolveTopicWithoutLLM(ctx context.Context, message storage.Message) (storage.Topic, error) {
+func (m *TopicManager) AssignTopic(ctx context.Context, message storage.Message) (storage.Topic, []float32, error) {
 	now := time.Now()
 	if topic, ok, err := m.store.TopicForReply(ctx, message.ChatID, message.ReplyToID); err != nil {
-		return storage.Topic{}, err
+		return storage.Topic{}, nil, err
 	} else if ok {
-		return attachSenderToTopic(topic, message.SenderID, now), nil
+		return m.updateExistingTopic(ctx, topic, message, now)
 	}
 
-	topics, err := m.store.ListTopics(ctx, message.ChatID, 5)
+	embedding, err := m.embedMessage(ctx, message)
+	if err != nil {
+		return storage.Topic{}, nil, err
+	}
+	if embedding == nil {
+		return storage.Topic{}, nil, nil
+	}
+
+	nearestMessages, err := m.store.NearestMessages(ctx, message.ChatID, embedding, m.cfg.TopicKNNMessages)
+	if err != nil {
+		return storage.Topic{}, nil, err
+	}
+	nearestTopics, err := m.store.NearestTopics(ctx, message.ChatID, embedding, m.cfg.TopicKNNTopics)
+	if err != nil {
+		return storage.Topic{}, nil, err
+	}
+
+	raw, err := m.llm.CompleteJSON(ctx, llm.TaskClassifyMessageTopic, map[string]any{
+		"message":          message,
+		"nearest_messages": nearestMessages,
+		"nearest_topics":   nearestTopics,
+	}, `{"is_new_topic":true,"topic_id":"string","title":"string","summary":"string","decisions":["string"],"open_questions":["string"]}`)
+	if err != nil {
+		return m.fallbackTopic(ctx, message, embedding, now)
+	}
+	var decision topicClassification
+	if err := json.Unmarshal(raw, &decision); err != nil {
+		return m.fallbackTopic(ctx, message, embedding, now)
+	}
+
+	if !decision.IsNewTopic && strings.TrimSpace(decision.TopicID) != "" {
+		topic, ok, err := m.store.GetTopic(ctx, decision.TopicID)
+		if err != nil {
+			return storage.Topic{}, nil, err
+		}
+		if ok {
+			return m.applyTopicDecision(ctx, topic, message, decision, embedding, now)
+		}
+	}
+	return m.createTopic(ctx, message, decision, embedding, now)
+}
+
+func (m *TopicManager) UpdateFromMessage(ctx context.Context, message storage.Message) (storage.Topic, error) {
+	topic, embedding, err := m.AssignTopic(ctx, message)
 	if err != nil {
 		return storage.Topic{}, err
 	}
-	if matched, ok := matchTopic(message.Text, topics); ok {
-		return attachSenderToTopic(matched, message.SenderID, now), nil
+	message.TopicID = topic.ID
+	if err := m.store.UpsertMessage(ctx, message, embedding); err != nil {
+		return storage.Topic{}, err
 	}
+	return topic, nil
+}
 
+func (m *TopicManager) PatchFromMessageEdit(ctx context.Context, topicID string, message, previous storage.Message) (storage.Topic, error) {
+	topic, ok, err := m.store.GetTopic(ctx, topicID)
+	if err != nil {
+		return storage.Topic{}, err
+	}
+	if !ok {
+		return storage.Topic{}, nil
+	}
+	return m.applyTopicUpdate(ctx, topic, message, &previous, "edit", time.Now())
+}
+
+func (m *TopicManager) PatchFromMessageDelete(ctx context.Context, topicID string, deleted storage.Message) (storage.Topic, error) {
+	topic, ok, err := m.store.GetTopic(ctx, topicID)
+	if err != nil {
+		return storage.Topic{}, err
+	}
+	if !ok {
+		return storage.Topic{}, nil
+	}
+	return m.applyTopicUpdate(ctx, topic, storage.Message{}, &deleted, "delete", time.Now())
+}
+
+type topicClassification struct {
+	IsNewTopic    bool     `json:"is_new_topic"`
+	TopicID       string   `json:"topic_id"`
+	Title         string   `json:"title"`
+	Summary       string   `json:"summary"`
+	Decisions     []string `json:"decisions"`
+	OpenQuestions []string `json:"open_questions"`
+}
+
+func (m *TopicManager) createTopic(ctx context.Context, message storage.Message, decision topicClassification, embedding []float32, now time.Time) (storage.Topic, []float32, error) {
+	topic := storage.Topic{
+		ID:                 storage.NewTopicID(message.ChatID, now),
+		ChatID:             message.ChatID,
+		Title:              titleFromDecision(decision, message.Text),
+		Summary:            summaryFromDecision(decision, message.Text),
+		Decisions:          decision.Decisions,
+		OpenQuestions:      decision.OpenQuestions,
+		ActiveParticipants: participantIDs(message.SenderID),
+		UpdatedAt:          now,
+	}
+	if err := m.store.UpsertTopic(ctx, topic, embedding); err != nil {
+		return storage.Topic{}, nil, err
+	}
+	return topic, embedding, nil
+}
+
+func (m *TopicManager) updateExistingTopic(ctx context.Context, topic storage.Topic, message storage.Message, now time.Time) (storage.Topic, []float32, error) {
+	updated, err := m.applyTopicUpdate(ctx, topic, message, nil, "", now)
+	if err != nil {
+		return storage.Topic{}, nil, err
+	}
+	messageEmbedding, err := m.embedMessage(ctx, message)
+	if err != nil {
+		return updated, nil, err
+	}
+	return updated, messageEmbedding, nil
+}
+
+func (m *TopicManager) applyTopicUpdate(ctx context.Context, topic storage.Topic, message storage.Message, previous *storage.Message, change string, now time.Time) (storage.Topic, error) {
+	recent, err := m.store.RecentMessages(ctx, topic.ChatID, 20)
+	if err != nil {
+		return storage.Topic{}, err
+	}
+	payload := map[string]any{
+		"topic":   topic,
+		"message": message,
+		"recent":  recent,
+	}
+	if previous != nil {
+		payload["previous_message"] = *previous
+	}
+	if change != "" {
+		payload["change"] = change
+		payload["correction"] = true
+	}
+	raw, err := m.llm.CompleteJSON(ctx, llm.TaskUpdateTopic, payload,
+		`{"title":"string","summary":"string","decisions":["string"],"open_questions":["string"],"active_participants":["id"]}`)
+	if err == nil {
+		var patch topicPatch
+		if json.Unmarshal(raw, &patch) == nil {
+			mergeTopic(&topic, patch)
+		}
+	}
+	senderID := message.SenderID
+	if senderID == "" && previous != nil {
+		senderID = previous.SenderID
+	}
+	topic = attachSenderToTopic(topic, senderID, now)
+	topicEmbedding, err := m.embedTopicSummary(ctx, topic.Summary)
+	if err != nil {
+		return topic, m.store.UpsertTopic(ctx, topic, nil)
+	}
+	return topic, m.store.UpsertTopic(ctx, topic, topicEmbedding)
+}
+
+func (m *TopicManager) applyTopicDecision(ctx context.Context, topic storage.Topic, message storage.Message, decision topicClassification, messageEmbedding []float32, now time.Time) (storage.Topic, []float32, error) {
+	if decision.Title != "" {
+		topic.Title = decision.Title
+	}
+	if decision.Summary != "" {
+		topic.Summary = decision.Summary
+	}
+	if decision.Decisions != nil {
+		topic.Decisions = decision.Decisions
+	}
+	if decision.OpenQuestions != nil {
+		topic.OpenQuestions = decision.OpenQuestions
+	}
+	topic = attachSenderToTopic(topic, message.SenderID, now)
+	topicEmbedding, err := m.embedTopicSummary(ctx, topic.Summary)
+	if err != nil {
+		return topic, messageEmbedding, m.store.UpsertTopic(ctx, topic, nil)
+	}
+	return topic, messageEmbedding, m.store.UpsertTopic(ctx, topic, topicEmbedding)
+}
+
+func (m *TopicManager) embedMessage(ctx context.Context, message storage.Message) ([]float32, error) {
+	parentText := ""
+	if message.ReplyToID != "" {
+		if parent, ok, err := m.store.GetMessage(ctx, message.ChatID, message.ReplyToID); err != nil {
+			return nil, err
+		} else if ok {
+			parentText = parent.Text
+		}
+	}
+	vectors, err := m.embedder.Embed(ctx, llm.MessageEmbeddingText(message.Text, parentText))
+	if err != nil {
+		return nil, err
+	}
+	if len(vectors) == 0 {
+		return nil, nil
+	}
+	return vectors[0], nil
+}
+
+func (m *TopicManager) embedTopicSummary(ctx context.Context, summary string) ([]float32, error) {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return nil, nil
+	}
+	vectors, err := m.embedder.Embed(ctx, summary)
+	if err != nil {
+		return nil, err
+	}
+	if len(vectors) == 0 {
+		return nil, nil
+	}
+	return vectors[0], nil
+}
+
+func (m *TopicManager) fallbackTopic(ctx context.Context, message storage.Message, embedding []float32, now time.Time) (storage.Topic, []float32, error) {
 	topic := storage.Topic{
 		ID:                 storage.NewTopicID(message.ChatID, now),
 		ChatID:             message.ChatID,
 		Title:              titleFromText(message.Text),
 		Summary:            message.Text,
-		ActiveParticipants: []string{},
+		ActiveParticipants: participantIDs(message.SenderID),
 		UpdatedAt:          now,
 	}
-	return attachSenderToTopic(topic, message.SenderID, now), nil
+	return topic, embedding, m.store.UpsertTopic(ctx, topic, embedding)
 }
 
 func attachSenderToTopic(topic storage.Topic, senderID string, updatedAt time.Time) storage.Topic {
@@ -55,78 +255,25 @@ func attachSenderToTopic(topic storage.Topic, senderID string, updatedAt time.Ti
 	return topic
 }
 
-func (m *TopicManager) UpdateFromMessage(ctx context.Context, message storage.Message) (storage.Topic, error) {
-	now := time.Now()
-	if topic, ok, err := m.store.TopicForReply(ctx, message.ChatID, message.ReplyToID); err != nil {
-		return storage.Topic{}, err
-	} else if ok {
-		return m.patchTopic(ctx, topic, message)
+func participantIDs(senderID string) []string {
+	if senderID == "" {
+		return nil
 	}
-
-	topics, err := m.store.ListTopics(ctx, message.ChatID, 5)
-	if err != nil {
-		return storage.Topic{}, err
-	}
-	if matched, ok := matchTopic(message.Text, topics); ok {
-		return m.patchTopic(ctx, matched, message)
-	}
-
-	topic := storage.Topic{
-		ID:                 storage.NewTopicID(message.ChatID, now),
-		ChatID:             message.ChatID,
-		Title:              titleFromText(message.Text),
-		Summary:            message.Text,
-		ActiveParticipants: []string{message.SenderID},
-		UpdatedAt:          now,
-	}
-	return m.patchTopic(ctx, topic, message)
+	return []string{senderID}
 }
 
-func (m *TopicManager) RebuildTopic(ctx context.Context, topicID string) (storage.Topic, error) {
-	topic, ok, err := m.store.GetTopic(ctx, topicID)
-	if err != nil || !ok {
-		return topic, err
+func titleFromDecision(decision topicClassification, fallback string) string {
+	if strings.TrimSpace(decision.Title) != "" {
+		return strings.TrimSpace(decision.Title)
 	}
-	messages, err := m.store.TopicMessages(ctx, topic.ChatID, topicID)
-	if err != nil {
-		return storage.Topic{}, err
-	}
-	rebuilt := rebuildTopicFallback(topic, messages)
-	raw, err := m.llm.CompleteJSON(ctx, llm.TaskRebuildTopic, map[string]any{
-		"topic":    topic,
-		"messages": messages,
-	}, `{"title":"string","summary":"string","decisions":["string"],"open_questions":["string"],"active_participants":["id"]}`)
-	if err == nil {
-		var patch topicPatch
-		if json.Unmarshal(raw, &patch) == nil {
-			mergeTopic(&rebuilt, patch)
-		}
-	}
-	rebuilt.UpdatedAt = time.Now()
-	return rebuilt, m.store.UpsertTopic(ctx, rebuilt)
+	return titleFromText(fallback)
 }
 
-func (m *TopicManager) patchTopic(ctx context.Context, topic storage.Topic, message storage.Message) (storage.Topic, error) {
-	recent, err := m.store.RecentMessages(ctx, message.ChatID, 20)
-	if err != nil {
-		return storage.Topic{}, err
+func summaryFromDecision(decision topicClassification, fallback string) string {
+	if strings.TrimSpace(decision.Summary) != "" {
+		return strings.TrimSpace(decision.Summary)
 	}
-	raw, err := m.llm.CompleteJSON(ctx, llm.TaskUpdateTopic, map[string]any{
-		"topic":   topic,
-		"message": message,
-		"recent":  recent,
-	}, `{"title":"string","summary":"string","decisions":["string"],"open_questions":["string"],"active_participants":["id"]}`)
-	if err == nil {
-		var patch topicPatch
-		if json.Unmarshal(raw, &patch) == nil {
-			mergeTopic(&topic, patch)
-		}
-	}
-	if !containsString(topic.ActiveParticipants, message.SenderID) && message.SenderID != "" {
-		topic.ActiveParticipants = append(topic.ActiveParticipants, message.SenderID)
-	}
-	topic.UpdatedAt = time.Now()
-	return topic, m.store.UpsertTopic(ctx, topic)
+	return strings.TrimSpace(fallback)
 }
 
 func mergeTopic(topic *storage.Topic, patch topicPatch) {
@@ -149,44 +296,6 @@ func mergeTopic(topic *storage.Topic, patch topicPatch) {
 	}
 }
 
-func rebuildTopicFallback(topic storage.Topic, messages []storage.Message) storage.Topic {
-	topic.Decisions = nil
-	topic.OpenQuestions = nil
-	topic.ActiveParticipants = nil
-	if len(messages) == 0 {
-		topic.Summary = ""
-		return topic
-	}
-	topic.Title = titleFromText(messages[0].Text)
-	var summaries []string
-	for _, message := range messages {
-		if strings.TrimSpace(message.Text) != "" {
-			summaries = append(summaries, message.Text)
-		}
-		if message.SenderID != "" && !containsString(topic.ActiveParticipants, message.SenderID) {
-			topic.ActiveParticipants = append(topic.ActiveParticipants, message.SenderID)
-		}
-	}
-	topic.Summary = strings.Join(summaries, "\n")
-	return topic
-}
-
-func matchTopic(text string, topics []storage.Topic) (storage.Topic, bool) {
-	lower := strings.ToLower(text)
-	for _, topic := range topics {
-		title := strings.ToLower(topic.Title)
-		if title != "" && strings.Contains(lower, title) {
-			return topic, true
-		}
-		for _, word := range strings.Fields(title) {
-			if len([]rune(word)) > 4 && strings.Contains(lower, word) {
-				return topic, true
-			}
-		}
-	}
-	return storage.Topic{}, false
-}
-
 func titleFromText(text string) string {
 	text = strings.TrimSpace(text)
 	runes := []rune(text)
@@ -194,7 +303,7 @@ func titleFromText(text string) string {
 		return string(runes[:48])
 	}
 	if text == "" {
-		return "Новая тема"
+		return "New topic"
 	}
 	return text
 }

@@ -16,7 +16,6 @@ import (
 
 type App struct {
 	messenger  transport.Messenger
-	store      *storage.Store
 	memory     *memory.Pipeline
 	replies    *reply.Service
 	logger     *slog.Logger
@@ -25,13 +24,12 @@ type App struct {
 	chatMemory *chatMemoryLocker
 }
 
-func New(messenger transport.Messenger, store *storage.Store, memoryPipeline *memory.Pipeline, replyService *reply.Service, logger *slog.Logger, recorder metrics.Recorder) *App {
+func New(messenger transport.Messenger, memoryPipeline *memory.Pipeline, replyService *reply.Service, logger *slog.Logger, recorder metrics.Recorder) *App {
 	if recorder == nil {
 		recorder = metrics.Noop
 	}
 	return &App{
 		messenger:  messenger,
-		store:      store,
 		memory:     memoryPipeline,
 		replies:    replyService,
 		logger:     logger,
@@ -46,11 +44,10 @@ func (a *App) RunChatMemory(ctx context.Context, chatID string, fn func(context.
 	return a.chatMemory.runPrepare(ctx, chatID, fn)
 }
 
-// UpdateDailySummary runs on the per-chat background FIFO queue.
-func (a *App) UpdateDailySummary(ctx context.Context, chatID string, date time.Time) error {
-	ctx = tracing.WithTraceID(ctx, tracing.NewID())
-	return a.chatMemory.runBackground(ctx, chatID, func(ctx context.Context) error {
-		return a.memory.UpdateDailySummary(ctx, chatID, date)
+func (a *App) DeliverDueReminders(ctx context.Context, now time.Time) error {
+	return a.memory.DeliverDueReminders(ctx, now, func(ctx context.Context, chatID, text string) error {
+		_, err := a.messenger.SendText(ctx, transport.OutboundMessage{ChatID: chatID, Text: text})
+		return err
 	})
 }
 
@@ -97,8 +94,22 @@ func (a *App) handleMessageUpdated(_ context.Context, message transport.Message)
 	return nil
 }
 
-func (a *App) handleMessageDeleted(_ context.Context, chatID, messageID string) error {
+func (a *App) handleMessageDeleted(parent context.Context, chatID, messageID string) error {
 	a.processor.onDeleted(chatID, messageID)
+	if chatID != "" && messageID != "" {
+		bgCtx := tracing.WithParentTraceID(tracing.WithTraceID(parent, tracing.NewID()), tracing.TraceID(parent))
+		go func() {
+			if err := a.chatMemory.runBackground(bgCtx, chatID, func(ctx context.Context) error {
+				return a.memory.ProcessMessageDelete(ctx, chatID, messageID)
+			}); err != nil {
+				a.logger.ErrorContext(bgCtx, "background memory delete failed",
+					"chat_id", chatID,
+					"message_id", messageID,
+					"error", err,
+				)
+			}
+		}()
+	}
 	a.logger.Info("message delete scheduled", "chat_id", chatID, "message_id", messageID)
 	return nil
 }
@@ -151,11 +162,7 @@ func (a *App) handleMessageProcessing(procCtx context.Context, state *messageSta
 		return errMessageDeleted
 	}
 
-	if err := a.store.UpsertChat(procCtx, storage.Chat{
-		ID:        message.ChatID,
-		IsGroup:   message.IsGroup,
-		UpdatedAt: time.Now(),
-	}); err != nil {
+	if err := a.memory.EnsureChat(procCtx, message); err != nil {
 		return err
 	}
 
@@ -173,7 +180,9 @@ func (a *App) handleMessageProcessing(procCtx context.Context, state *messageSta
 		revBefore := revision
 		err = a.RunChatMemory(procCtx, message.ChatID, func(ctx context.Context) error {
 			var prepErr error
+			prepStart := time.Now()
 			topic, prepErr = a.memory.PrepareForReply(ctx, message)
+			a.recorder.RecordMessagePhase(metrics.PhaseMemoryPrepare, time.Since(prepStart))
 			return prepErr
 		})
 		if err != nil {
@@ -275,7 +284,7 @@ func (a *App) finishMessageMemoryLocked(procCtx context.Context, state *messageS
 		memoryCtx := a.processor.memoryContext(procCtx, state)
 		t0 := time.Now()
 		err := a.memory.ProcessMessageUpdate(memoryCtx, message)
-		a.recorder.RecordMessagePhase(metrics.PhaseMemory, time.Since(t0))
+		a.recorder.RecordMessagePhase(metrics.PhaseMemoryBackground, time.Since(t0))
 		if err != nil {
 			if isContextCancelled(memoryCtx) {
 				message, revision, deleted = a.processor.snapshot(state)
@@ -312,6 +321,7 @@ func (a *App) finishMessageMemoryLocked(procCtx context.Context, state *messageS
 	if deleted {
 		return
 	}
+	outboundStart := time.Now()
 	if _, err := a.memory.ProcessMessage(procCtx, transport.Message{
 		ID:         replyID,
 		ChatID:     outbound.ChatID,
@@ -328,5 +338,7 @@ func (a *App) finishMessageMemoryLocked(procCtx context.Context, state *messageS
 			"message_id", replyID,
 			"error", err,
 		)
+	} else {
+		a.recorder.RecordMessagePhase(metrics.PhaseMemoryOutbound, time.Since(outboundStart))
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os/exec"
 	"slices"
@@ -27,6 +28,7 @@ type Registry struct {
 	toolEntries   []toolEntry
 	promptAppends []promptAppend
 	recorder      metrics.Recorder
+	logger        *slog.Logger
 }
 
 type toolEntry struct {
@@ -60,7 +62,7 @@ type route struct {
 // entries are registered as native OpenRouter server tools without a session. Entries that fail to
 // connect, list tools, or validate are skipped; messages for logging are returned in warnings.
 // If no entry registers successfully, reg is nil.
-func Connect(ctx context.Context, servers map[string]MCPServerEntry, httpClient *http.Client, recorder metrics.Recorder) (reg *Registry, warnings []string) {
+func Connect(ctx context.Context, servers map[string]MCPServerEntry, httpClient *http.Client, recorder metrics.Recorder, logger *slog.Logger) (reg *Registry, warnings []string) {
 	if len(servers) == 0 {
 		return nil, nil
 	}
@@ -78,6 +80,7 @@ func Connect(ctx context.Context, servers map[string]MCPServerEntry, httpClient 
 		sessions: make(map[string]*mcp.ClientSession, len(servers)),
 		routes:   make(map[string]route),
 		recorder: recorder,
+		logger:   logger,
 	}
 
 	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "Assistant Bot", Version: "1"}, nil)
@@ -255,7 +258,7 @@ func (r *Registry) SystemPromptAppendForTask(task string) string {
 }
 
 // ExecuteTool runs a prefixed tool name on the correct MCP session.
-func (r *Registry) ExecuteTool(ctx context.Context, prefixedName string, argumentsJSON string) (_ string, err error) {
+func (r *Registry) ExecuteTool(ctx context.Context, prefixedName string, argumentsJSON string) (result string, err error) {
 	start := time.Now()
 	serverID, toolName := "unknown", prefixedName
 	defer func() {
@@ -268,6 +271,10 @@ func (r *Registry) ExecuteTool(ctx context.Context, prefixedName string, argumen
 			outcome = mcpOutcome(err)
 		}
 		rec.RecordMCPTool(serverID, toolName, outcome, time.Since(start))
+		if r != nil {
+			llm.LogToolCall(ctx, r.logger, metrics.ToolSourceMCP, prefixedName, argumentsJSON, result, err, time.Since(start),
+				"server", serverID, "mcp_tool", toolName)
+		}
 	}()
 
 	if r == nil {

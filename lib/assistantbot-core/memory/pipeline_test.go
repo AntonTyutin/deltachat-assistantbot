@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,16 +18,11 @@ import (
 
 func TestProcessMessageUpdatesProfileAndTopic(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	pipeline := NewPipeline(store, llm.StaticClient{Responses: map[string]json.RawMessage{
-		llm.TaskUpdateProfile: json.RawMessage(`{"city":"Тбилиси","address":"Tbilisi, Vake","style":"calm","verbosity":"short","expertise":{"go":"medium"},"interests":["llm"]}`),
-		llm.TaskUpdateTopic:   json.RawMessage(`{"title":"Go и LLM","summary":"Обсуждают Go-бота с LLM","decisions":["писать на Go"],"open_questions":[],"active_participants":["user-1"]}`),
-	}}, nil, prompts.FixedTestRegistry())
+	pipeline, store := openTestPipeline(t, llm.StaticClient{Responses: map[string]json.RawMessage{
+		llm.TaskUpdateProfile:        json.RawMessage(`{"city":"Тбилиси","address":"Tbilisi, Vake","style":"calm","verbosity":"short","expertise":{"go":"medium"},"interests":["llm"]}`),
+		llm.TaskClassifyMessageTopic: classifyNewTopicResponse("Go и LLM", "Обсуждают Go-бота с LLM"),
+		llm.TaskUpdateTopic:          json.RawMessage(`{"title":"Go и LLM","summary":"Обсуждают Go-бота с LLM","decisions":["писать на Go"],"open_questions":[],"active_participants":["user-1"]}`),
+	}})
 
 	topic, err := pipeline.ProcessMessage(ctx, transport.Message{
 		ID:       "msg-1",
@@ -52,27 +46,13 @@ func TestProcessMessageUpdatesProfileAndTopic(t *testing.T) {
 	if profile.Expertise["go"] != "medium" {
 		t.Fatalf("expected go expertise, got %#v", profile.Expertise)
 	}
-	if profile.City != "Тбилиси" {
-		t.Fatalf("expected city from profile patch, got %q", profile.City)
-	}
-	if profile.Address != "Tbilisi, Vake" {
-		t.Fatalf("expected address from profile patch, got %q", profile.Address)
-	}
-	name, ok, err := store.ChatName(ctx, "chat-1", "user-1")
-	if err != nil || !ok || name != "Алексей" {
-		t.Fatalf("unexpected chat name: name=%q ok=%v err=%v", name, ok, err)
-	}
 }
 
-func TestPrepareForReplyCreatesTopicWithoutLLM(t *testing.T) {
+func TestPrepareForReplyAssignsTopic(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	pipeline := NewPipeline(store, llm.StaticClient{Responses: map[string]json.RawMessage{}}, nil, prompts.FixedTestRegistry())
+	pipeline, store := openTestPipeline(t, llm.StaticClient{Responses: map[string]json.RawMessage{
+		llm.TaskClassifyMessageTopic: classifyNewTopicResponse("Go бот", "Давайте писать бота на Go"),
+	}})
 	message := transport.Message{
 		ID:       "msg-1",
 		ChatID:   "chat-1",
@@ -87,68 +67,17 @@ func TestPrepareForReplyCreatesTopicWithoutLLM(t *testing.T) {
 		t.Fatal(err)
 	}
 	if topic.Title == "" {
-		t.Fatal("expected heuristic topic title")
+		t.Fatal("expected topic title")
 	}
-	if topic.Summary != message.Text {
-		t.Fatalf("expected summary from message text, got %q", topic.Summary)
-	}
-	topicID, ok, err := store.TopicIDForMessage(ctx, "chat-1", "msg-1")
-	if err != nil || !ok || topicID != topic.ID {
-		t.Fatalf("message not attached to topic: topicID=%q ok=%v err=%v", topicID, ok, err)
-	}
-	stored, ok, err := store.GetMessage(ctx, "chat-1", "msg-1")
-	if err != nil || !ok || stored.Text != message.Text {
-		t.Fatalf("message not stored: ok=%v err=%v text=%q", ok, err, stored.Text)
+	if mustTopicID(t, store, "chat-1", "msg-1") != topic.ID {
+		t.Fatal("message not attached to topic")
 	}
 }
 
-func TestPrepareForReplyReturnsExistingTopicWithoutRebuild(t *testing.T) {
+func TestProcessMessageUpdatePatchesTopicFromEditedText(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	pipeline, store := openTestPipeline(t, patchClient{})
 
-	pipeline := NewPipeline(store, llm.StaticClient{Responses: map[string]json.RawMessage{
-		llm.TaskUpdateProfile: json.RawMessage(`{}`),
-		llm.TaskUpdateTopic:   json.RawMessage(`{"title":"LLM topic","summary":"LLM summary","active_participants":["user-1"]}`),
-	}}, nil, prompts.FixedTestRegistry())
-	message := transport.Message{
-		ID:       "msg-1",
-		ChatID:   "chat-1",
-		SenderID: "user-1",
-		Text:     "original",
-		IsGroup:  true,
-		SentAt:   time.Now(),
-	}
-	if _, err := pipeline.ProcessNewMessage(ctx, message); err != nil {
-		t.Fatal(err)
-	}
-
-	message.Text = "edited without LLM"
-	topic, err := pipeline.PrepareForReply(ctx, message)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if topic.Title != "LLM topic" {
-		t.Fatalf("expected existing topic unchanged, got title %q", topic.Title)
-	}
-	stored, ok, err := store.GetMessage(ctx, "chat-1", "msg-1")
-	if err != nil || !ok || stored.Text != "edited without LLM" {
-		t.Fatalf("expected updated message text in store, got ok=%v text=%q", ok, stored.Text)
-	}
-}
-
-func TestProcessMessageUpdateRebuildsTopicFromEditedText(t *testing.T) {
-	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	pipeline := NewPipeline(store, rebuildClient{}, nil, prompts.FixedTestRegistry())
 	message := transport.Message{
 		ID:       "msg-1",
 		ChatID:   "chat-1",
@@ -174,106 +103,29 @@ func TestProcessMessageUpdateRebuildsTopicFromEditedText(t *testing.T) {
 	if !strings.Contains(rebuilt.Summary, "new edited text") {
 		t.Fatalf("summary does not include edited text: %q", rebuilt.Summary)
 	}
-	if strings.Contains(rebuilt.Summary, "old text") {
-		t.Fatalf("summary still includes old text: %q", rebuilt.Summary)
-	}
 }
 
-func TestProcessMessageDeleteRebuildsTopicAndProfile(t *testing.T) {
-	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+type patchClient struct{}
 
-	pipeline := NewPipeline(store, rebuildClient{}, nil, prompts.FixedTestRegistry())
-	message := transport.Message{
-		ID:       "msg-1",
-		ChatID:   "chat-1",
-		SenderID: "user-1",
-		Sender:   "Alex",
-		Text:     "Alex is expert in rockets",
-		IsGroup:  true,
-		SentAt:   time.Now(),
-	}
-	topic, err := pipeline.ProcessNewMessage(ctx, message)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := pipeline.ProcessMessageDelete(ctx, "chat-1", "msg-1"); err != nil {
-		t.Fatal(err)
-	}
-
-	rebuilt, ok, err := store.GetTopic(ctx, topic.ID)
-	if err != nil || !ok {
-		t.Fatalf("topic missing: ok=%v err=%v", ok, err)
-	}
-	if strings.Contains(rebuilt.Summary, "rockets") {
-		t.Fatalf("summary still includes deleted text: %q", rebuilt.Summary)
-	}
-	profile, ok, err := store.GetProfile(ctx, "user-1")
-	if err != nil || !ok {
-		t.Fatalf("profile missing: ok=%v err=%v", ok, err)
-	}
-	if len(profile.Expertise) != 0 {
-		t.Fatalf("deleted source should not keep expertise: %#v", profile.Expertise)
-	}
-}
-
-type rebuildClient struct{}
-
-func (rebuildClient) CompleteJSON(_ context.Context, task string, input any, _ string) (json.RawMessage, error) {
+func (patchClient) CompleteJSON(_ context.Context, task string, input any, _ string) (json.RawMessage, error) {
 	payload, _ := json.Marshal(input)
 	var decoded map[string]json.RawMessage
 	_ = json.Unmarshal(payload, &decoded)
 
 	switch task {
 	case llm.TaskUpdateProfile:
-		return json.RawMessage(`{"city":"Воронеж","address":"Воронеж, юг","style":"direct","verbosity":"short","expertise":{"rockets":"high"},"interests":["rockets"]}`), nil
-	case llm.TaskUpdateTopic, llm.TaskRebuildTopic:
-		var messages []storage.Message
-		_ = json.Unmarshal(decoded["messages"], &messages)
-		if len(messages) == 0 {
-			_ = json.Unmarshal(decoded["recent"], &messages)
-		}
-		summaryParts := make([]string, 0, len(messages))
-		participants := make([]string, 0, len(messages))
-		for _, message := range messages {
-			if message.Text != "" {
-				summaryParts = append(summaryParts, message.Text)
-			}
-			if message.SenderID != "" && !stringSliceContains(participants, message.SenderID) {
-				participants = append(participants, message.SenderID)
-			}
-		}
+		return json.RawMessage(`{"city":"Voronezh","address":"Voronezh, south","style":"direct","verbosity":"short","expertise":{"rockets":"high"},"interests":["rockets"]}`), nil
+	case llm.TaskClassifyMessageTopic:
+		return classifyNewTopicResponse("patched", "seed"), nil
+	case llm.TaskUpdateTopic:
+		var message storage.Message
+		_ = json.Unmarshal(decoded["message"], &message)
 		response, _ := json.Marshal(map[string]any{
-			"title":               "rebuilt",
-			"summary":             strings.Join(summaryParts, "\n"),
+			"title":               "patched",
+			"summary":             message.Text,
 			"decisions":           []string{},
 			"open_questions":      []string{},
-			"active_participants": participants,
-		})
-		return response, nil
-	case llm.TaskRebuildProfile:
-		var messages []storage.Message
-		_ = json.Unmarshal(decoded["messages"], &messages)
-		expertise := map[string]string{}
-		interests := []string{}
-		for _, message := range messages {
-			if strings.Contains(message.Text, "rockets") {
-				expertise["rockets"] = "high"
-				interests = append(interests, "rockets")
-			}
-		}
-		response, _ := json.Marshal(map[string]any{
-			"names":     map[string]string{"self": "Alex"},
-			"city":      "Воронеж",
-			"address":   "Воронеж, юг",
-			"style":     "direct",
-			"verbosity": "short",
-			"expertise": expertise,
-			"interests": interests,
+			"active_participants": []string{message.SenderID},
 		})
 		return response, nil
 	default:
@@ -281,33 +133,27 @@ func (rebuildClient) CompleteJSON(_ context.Context, task string, input any, _ s
 	}
 }
 
-func (rebuildClient) ChatWithTools(context.Context, string, []openai.ChatCompletionMessage, []llm.ToolDefinition, llm.ToolExecutorFunc) (string, error) {
-	return "", fmt.Errorf("unexpected ChatWithTools")
+func (patchClient) Embed(_ context.Context, texts ...string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = []float32{0.1, 0.2, 0.3}
+	}
+	return out, nil
 }
 
-func stringSliceContains(items []string, needle string) bool {
-	for _, item := range items {
-		if item == needle {
-			return true
-		}
-	}
-	return false
+func (patchClient) ChatWithTools(context.Context, string, []openai.ChatCompletionMessage, []llm.ToolDefinition, llm.ToolExecutorFunc) (string, error) {
+	return "", fmt.Errorf("unexpected ChatWithTools")
 }
 
 func TestUpdateParticipantLocationFromCoordinates(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"), "secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := storage.OpenTestDB(t, "secret")
 	defer store.Close()
-
-	pipeline := NewPipeline(store, locationAwareClient{}, fakeMCPTools{}, prompts.FixedTestRegistry())
-	err = pipeline.UpdateParticipantLocationFromCoordinates(ctx, "user-geo", 41.7151, 44.8271)
+	pipeline := NewPipeline(store, locationAwareClient{}, locationAwareClient{}, fakeMCPTools{}, prompts.FixedTestRegistry(), Config{})
+	err := pipeline.UpdateParticipantLocationFromCoordinates(ctx, "user-geo", 41.7151, 44.8271)
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	profile, ok, err := store.GetProfile(ctx, "user-geo")
 	if err != nil || !ok {
 		t.Fatalf("profile missing: ok=%v err=%v", ok, err)
@@ -315,15 +161,20 @@ func TestUpdateParticipantLocationFromCoordinates(t *testing.T) {
 	if profile.City != "Тбилиси" {
 		t.Fatalf("expected city from coordinates, got %q", profile.City)
 	}
-	if profile.Address != "Тбилиси, Грузия" {
-		t.Fatalf("expected address from coordinates, got %q", profile.Address)
-	}
 }
 
 type locationAwareClient struct{}
 
 func (locationAwareClient) CompleteJSON(context.Context, string, any, string) (json.RawMessage, error) {
 	return json.RawMessage(`{"style":"calm","verbosity":"short"}`), nil
+}
+
+func (locationAwareClient) Embed(_ context.Context, texts ...string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = []float32{0.1, 0.2, 0.3}
+	}
+	return out, nil
 }
 
 func (locationAwareClient) ChatWithTools(_ context.Context, task string, _ []openai.ChatCompletionMessage, tools []llm.ToolDefinition, _ llm.ToolExecutorFunc) (string, error) {

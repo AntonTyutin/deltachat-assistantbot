@@ -14,18 +14,18 @@ func TestModelsForTaskUsesTaskOverride(t *testing.T) {
 	if len(gotReply) != 2 || gotReply[0] != "reply-model" || gotReply[1] != "reply-model-2" {
 		t.Fatalf("expected override models, got %#v", gotReply)
 	}
-	gotSummary := client.modelsForTask("daily_summary")
-	if len(gotSummary) != 1 || gotSummary[0] != "default-model" {
-		t.Fatalf("expected default-model fallback, got %#v", gotSummary)
+	gotClassify := client.modelsForTask("classify_message_topic")
+	if len(gotClassify) != 1 || gotClassify[0] != "default-model" {
+		t.Fatalf("expected default-model fallback, got %#v", gotClassify)
 	}
 }
 
 func TestModelsForTaskIgnoresBlankOverrides(t *testing.T) {
 	client := NewOpenRouterClient("https://example.com/api", "key", "default-model", map[string]string{
-		"daily_summary": "   ",
+		"classify_message_topic": "   ",
 	}, nil, time.Second, 1024, nil)
 
-	got := client.modelsForTask("daily_summary")
+	got := client.modelsForTask("classify_message_topic")
 	if len(got) != 1 || got[0] != "default-model" {
 		t.Fatalf("expected default-model fallback, got %#v", got)
 	}
@@ -58,7 +58,7 @@ func TestMaxCompletionTokensForTaskUsesOverride(t *testing.T) {
 	if got := client.maxCompletionTokensForTask("generate_chat_reply"); got != 700 {
 		t.Fatalf("expected task override 700, got %d", got)
 	}
-	if got := client.maxCompletionTokensForTask("daily_summary"); got != 2048 {
+	if got := client.maxCompletionTokensForTask("classify_message_topic"); got != 2048 {
 		t.Fatalf("expected fallback 2048, got %d", got)
 	}
 }

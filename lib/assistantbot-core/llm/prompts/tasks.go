@@ -2,12 +2,10 @@ package prompts
 
 // Task ids that may appear as keys in the prompts YAML file (besides default).
 const (
-	TaskGenerateChatReply = "generate_chat_reply"
-	TaskUpdateProfile     = "update_participant_profile"
-	TaskRebuildProfile    = "rebuild_participant_profile"
-	TaskUpdateTopic       = "update_chat_topic"
-	TaskRebuildTopic      = "rebuild_chat_topic"
-	TaskDailySummary      = "daily_summary"
+	TaskGenerateChatReply    = "generate_chat_reply"
+	TaskUpdateProfile        = "update_participant_profile"
+	TaskUpdateTopic          = "update_chat_topic"
+	TaskClassifyMessageTopic = "classify_message_topic"
 )
 
 // YAMLTaskIDs returns prompts file task keys.
@@ -15,10 +13,8 @@ func YAMLTaskIDs() []string {
 	return []string{
 		TaskGenerateChatReply,
 		TaskUpdateProfile,
-		TaskRebuildProfile,
 		TaskUpdateTopic,
-		TaskRebuildTopic,
-		TaskDailySummary,
+		TaskClassifyMessageTopic,
 	}
 }
 

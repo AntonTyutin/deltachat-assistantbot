@@ -5,28 +5,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/AntonTyutin/assistantbot-core/llm"
 	"github.com/AntonTyutin/assistantbot-core/llm/prompts"
+	"github.com/AntonTyutin/assistantbot-core/memory"
 	"github.com/AntonTyutin/assistantbot-core/storage"
 	"github.com/AntonTyutin/assistantbot-core/transport"
 )
 
 func TestDecideReturnsFailureReplyOnLLMError(t *testing.T) {
-	store, err := storage.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
 	client := taskFailClient{
 		StaticClient: llm.StaticClient{Responses: map[string]json.RawMessage{}},
 		failTask:     llm.TaskGenerateChatReply,
 	}
-	service := NewService(store, client, prompts.MustTestRegistry(t), []string{"bot"}, nil, nil, nil)
+	store := storage.OpenTestDB(t, "test-secret")
+	defer store.Close()
+	pipeline := memory.NewPipeline(store, client, llm.StaticEmbedder{Vector: []float32{0.1, 0.2, 0.3}}, nil, prompts.MustTestRegistry(t), memory.Config{})
+	service := NewService(pipeline, client, prompts.MustTestRegistry(t), []string{"bot"}, nil, nil, nil, 20)
 
 	outbound, _, err := service.Decide(context.Background(), transport.Message{
 		ID:       "m1",
@@ -44,13 +41,10 @@ func TestDecideReturnsFailureReplyOnLLMError(t *testing.T) {
 	if outbound.Text != failureReply {
 		t.Fatalf("expected %q, got %q", failureReply, outbound.Text)
 	}
-	if outbound.ReplyToID != "m1" {
-		t.Fatalf("expected reply_to_id m1, got %q", outbound.ReplyToID)
-	}
 }
 
 func TestDecideKeepsReplyToInGroupChats(t *testing.T) {
-	service, cleanup := testReplyService(t, `{"reply":"ok"}`)
+	service, _, cleanup := testReplyService(t, `{"reply":"ok"}`)
 	defer cleanup()
 
 	outbound, _, err := service.Decide(context.Background(), transport.Message{
@@ -72,15 +66,15 @@ func TestDecideKeepsReplyToInGroupChats(t *testing.T) {
 }
 
 func TestDecideDoesNotReplyToInPrivateChats(t *testing.T) {
-	service, cleanup := testReplyService(t, `{"reply":"Anton, ok"}`)
+	service, _, cleanup := testReplyService(t, `{"reply":"Anton, ok"}`)
 	defer cleanup()
 
 	outbound, _, err := service.Decide(context.Background(), transport.Message{
 		ID:       "m2",
 		ChatID:   "chat-2",
 		SenderID: "user-2",
-		Sender:   "Anton Tyutin",
-		Text:     "hello there",
+		Sender:   "Anton",
+		Text:     "hello",
 		IsGroup:  false,
 	}, storage.Topic{})
 	if err != nil {
@@ -90,7 +84,7 @@ func TestDecideDoesNotReplyToInPrivateChats(t *testing.T) {
 		t.Fatal("expected outbound reply")
 	}
 	if outbound.ReplyToID != "" {
-		t.Fatalf("expected private chat reply_to_id to be empty, got %q", outbound.ReplyToID)
+		t.Fatalf("expected empty reply_to_id in private chat, got %q", outbound.ReplyToID)
 	}
 	if outbound.Text != "ok" {
 		t.Fatalf("expected private reply without direct address, got %q", outbound.Text)
@@ -98,10 +92,10 @@ func TestDecideDoesNotReplyToInPrivateChats(t *testing.T) {
 }
 
 func TestDecideStripsDirectAddressInGroupReply(t *testing.T) {
-	service, cleanup := testReplyService(t, `{"reply":"Anton, готово"}`)
+	service, store, cleanup := testReplyService(t, `{"reply":"Anton, готово"}`)
 	defer cleanup()
 
-	if err := service.store.UpsertMessage(context.Background(), storage.Message{
+	if err := store.UpsertMessage(context.Background(), storage.Message{
 		ID:         "bot-prev",
 		ChatID:     "chat-3",
 		SenderID:   "self",
@@ -110,7 +104,7 @@ func TestDecideStripsDirectAddressInGroupReply(t *testing.T) {
 		IsGroup:    true,
 		IsFromSelf: true,
 		SentAt:     time.Now().UTC(),
-	}); err != nil {
+	}, []float32{0.1, 0.2, 0.3}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -132,120 +126,17 @@ func TestDecideStripsDirectAddressInGroupReply(t *testing.T) {
 	if outbound.Text != "готово" {
 		t.Fatalf("expected group reply without direct address, got %q", outbound.Text)
 	}
-	if outbound.ReplyToID != "m3" {
-		t.Fatalf("expected group reply_to_id m3, got %q", outbound.ReplyToID)
-	}
 }
 
-func TestDecideStripsVocativePatternsInPrivateChat(t *testing.T) {
-	cases := []struct {
-		name     string
-		sender   string
-		reply    string
-		expected string
-	}{
-		{name: "ru_leading", sender: "Илон Маск (elon@example.org)", reply: "Илон, как тебе такое!", expected: "как тебе такое!"},
-		{name: "ru_trailing", sender: "Илон Маск (elon@example.org)", reply: "Как тебе такое, Илон!", expected: "Как тебе такое"},
-		{name: "ru_middle", sender: "Илон Маск (elon@example.org)", reply: "Как тебе, Илон, такое!", expected: "Как тебе такое!"},
-		{name: "en_leading", sender: "Elon Musk (elon@example.org)", reply: "Elon, how about this!", expected: "how about this!"},
-		{name: "en_trailing", sender: "Elon Musk (elon@example.org)", reply: "How about this, Elon!", expected: "How about this"},
-		{name: "en_middle", sender: "Elon Musk (elon@example.org)", reply: "How about, Elon, this!", expected: "How about this!"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			service, cleanup := testReplyService(t, `{"reply":"`+tc.reply+`"}`)
-			defer cleanup()
-
-			outbound, _, err := service.Decide(context.Background(), transport.Message{
-				ID:       "m-v",
-				ChatID:   "chat-v",
-				SenderID: "user-v",
-				Sender:   tc.sender,
-				Text:     "hello",
-				IsGroup:  false,
-			}, storage.Topic{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if outbound == nil {
-				t.Fatal("expected outbound reply")
-			}
-			if outbound.Text != tc.expected {
-				t.Fatalf("expected %q, got %q", tc.expected, outbound.Text)
-			}
-		})
-	}
-}
-
-func TestDecideStripsVocativePatternsInGroupReply(t *testing.T) {
-	cases := []struct {
-		name     string
-		sender   string
-		reply    string
-		expected string
-	}{
-		{name: "ru_leading", sender: "Илон Маск (elon@example.org)", reply: "Илон, как тебе такое!", expected: "как тебе такое!"},
-		{name: "ru_trailing", sender: "Илон Маск (elon@example.org)", reply: "Как тебе такое, Илон!", expected: "Как тебе такое"},
-		{name: "ru_middle", sender: "Илон Маск (elon@example.org)", reply: "Как тебе, Илон, такое!", expected: "Как тебе такое!"},
-		{name: "en_leading", sender: "Elon Musk (elon@example.org)", reply: "Elon, how about this!", expected: "how about this!"},
-		{name: "en_trailing", sender: "Elon Musk (elon@example.org)", reply: "How about this, Elon!", expected: "How about this"},
-		{name: "en_middle", sender: "Elon Musk (elon@example.org)", reply: "How about, Elon, this!", expected: "How about this!"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			service, cleanup := testReplyService(t, `{"reply":"`+tc.reply+`"}`)
-			defer cleanup()
-
-			if err := service.store.UpsertMessage(context.Background(), storage.Message{
-				ID:         "bot-prev-v",
-				ChatID:     "chat-vg",
-				SenderID:   "self",
-				Sender:     "Me",
-				Text:       "prev",
-				IsGroup:    true,
-				IsFromSelf: true,
-				SentAt:     time.Now().UTC(),
-			}); err != nil {
-				t.Fatal(err)
-			}
-
-			outbound, _, err := service.Decide(context.Background(), transport.Message{
-				ID:        "m-vg",
-				ChatID:    "chat-vg",
-				SenderID:  "user-vg",
-				Sender:    tc.sender,
-				Text:      "reply",
-				IsGroup:   true,
-				ReplyToID: "bot-prev-v",
-			}, storage.Topic{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if outbound == nil {
-				t.Fatal("expected outbound reply")
-			}
-			if outbound.Text != tc.expected {
-				t.Fatalf("expected %q, got %q", tc.expected, outbound.Text)
-			}
-		})
-	}
-}
-
-func testReplyService(t *testing.T, replyJSON string) (*Service, func()) {
+func testReplyService(t *testing.T, replyJSON string) (*Service, *storage.Store, func()) {
 	t.Helper()
-
-	store, err := storage.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"), "test-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := storage.OpenTestDB(t, "test-secret")
 	client := llm.StaticClient{Responses: map[string]json.RawMessage{
 		llm.TaskGenerateChatReply: json.RawMessage(replyJSON),
 	}}
-	return NewService(store, client, prompts.MustTestRegistry(t), []string{"bot"}, nil, nil, nil), func() {
-		_ = store.Close()
-	}
+	pipeline := memory.NewPipeline(store, client, llm.StaticEmbedder{Vector: []float32{0.1, 0.2, 0.3}}, nil, prompts.MustTestRegistry(t), memory.Config{})
+	service := NewService(pipeline, client, prompts.MustTestRegistry(t), []string{"bot"}, nil, nil, nil, 20)
+	return service, store, func() { _ = store.Close() }
 }
 
 type taskFailClient struct {

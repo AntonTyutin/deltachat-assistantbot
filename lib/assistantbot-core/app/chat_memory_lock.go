@@ -14,7 +14,7 @@ const (
 )
 
 // chatMemoryLocker runs memory-path work per chat_id. Prepare and background use
-// separate FIFO workers so a slow background rebuild does not block the next
+// separate FIFO workers so a slow background memory update does not block the next
 // message's PrepareForReply (and thus Decide / SendText).
 type chatMemoryLocker struct {
 	chats sync.Map // string -> *chatMemoryLanes

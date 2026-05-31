@@ -21,8 +21,14 @@ type Config struct {
 	LLMTaskModels              map[string]string
 	LLMTaskMaxCompletionTokens map[string]int
 	BotNames                   []string
-	DailySummaryTime           string
 	HTTPTimeout                time.Duration
+	EmbeddingModel             string
+	EmbeddingDimensions        int
+	RecentMessagesLimit        int
+	ReminderPollInterval       time.Duration
+	TopicKNNMessages           int
+	TopicKNNTopics             int
+	ListKNNLists               int
 	LLMMaxCompletionTokens     int
 	LLMRetryBackoffMultiplier  float64
 	MCPServers                 map[string]mcpclient.MCPServerEntry
@@ -44,8 +50,14 @@ func FromEnv() (Config, error) {
 		LLMTaskModels:              llmTaskModels(),
 		LLMTaskMaxCompletionTokens: llmTaskMaxCompletionTokens(),
 		BotNames:                   splitList(env("BOT_NAMES", "bot,assistant")),
-		DailySummaryTime:           env("DAILY_SUMMARY_TIME", "03:00"),
 		HTTPTimeout:                time.Duration(envInt("HTTP_TIMEOUT_SECONDS", 30)) * time.Second,
+		EmbeddingModel:             env("EMBEDDING_MODEL", "text-embedding-3-small"),
+		EmbeddingDimensions:        envInt("EMBEDDING_DIMENSIONS", 1536),
+		RecentMessagesLimit:        envInt("RECENT_MESSAGES_LIMIT", 20),
+		ReminderPollInterval:       time.Duration(envInt("REMINDER_POLL_INTERVAL_SECONDS", 60)) * time.Second,
+		TopicKNNMessages:           envInt("TOPIC_KNN_MESSAGES", 5),
+		TopicKNNTopics:             envInt("TOPIC_KNN_TOPICS", 5),
+		ListKNNLists:               envInt("LIST_KNN_LISTS", 5),
 		LLMMaxCompletionTokens:     llmMaxCompletionTokens(),
 		LLMRetryBackoffMultiplier:  llmRetryBackoffMultiplier(),
 		MCPServers:                 mcpServers,
@@ -81,9 +93,6 @@ func (c Config) ValidateEditProfile() error {
 func (c Config) validate(missing []string) error {
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required env vars: %s", strings.Join(missing, ", "))
-	}
-	if _, err := time.Parse("15:04", c.DailySummaryTime); err != nil {
-		return fmt.Errorf("DAILY_SUMMARY_TIME must be HH:MM: %w", err)
 	}
 	return nil
 }
@@ -133,13 +142,8 @@ func llmTaskModels() map[string]string {
 	}
 
 	setTasks(os.Getenv("LLM_MODEL_REPLY"), "generate_chat_reply")
-	setTasks(os.Getenv("LLM_MODEL_SUMMARY"), "daily_summary")
-	setTasks(os.Getenv("LLM_MODEL_TOPIC"), "update_chat_topic", "rebuild_chat_topic")
-	setTasks(os.Getenv("LLM_MODEL_PROFILE"), "update_participant_profile", "rebuild_participant_profile")
-	setTasks(os.Getenv("LLM_MODEL_TOPIC_UPDATE"), "update_chat_topic")
-	setTasks(os.Getenv("LLM_MODEL_TOPIC_REBUILD"), "rebuild_chat_topic")
-	setTasks(os.Getenv("LLM_MODEL_PROFILE_UPDATE"), "update_participant_profile")
-	setTasks(os.Getenv("LLM_MODEL_PROFILE_REBUILD"), "rebuild_participant_profile")
+	setTasks(os.Getenv("LLM_MODEL_TOPIC"), "update_chat_topic", "classify_message_topic")
+	setTasks(os.Getenv("LLM_MODEL_PROFILE"), "update_participant_profile")
 	return models
 }
 
@@ -179,13 +183,8 @@ func llmTaskMaxCompletionTokens() map[string]int {
 	}
 
 	setTasks(os.Getenv("LLM_MAX_COMPLETION_TOKENS_REPLY"), "generate_chat_reply")
-	setTasks(os.Getenv("LLM_MAX_COMPLETION_TOKENS_SUMMARY"), "daily_summary")
-	setTasks(os.Getenv("LLM_MAX_COMPLETION_TOKENS_TOPIC"), "update_chat_topic", "rebuild_chat_topic")
-	setTasks(os.Getenv("LLM_MAX_COMPLETION_TOKENS_PROFILE"), "update_participant_profile", "rebuild_participant_profile")
-	setTasks(os.Getenv("LLM_MAX_COMPLETION_TOKENS_TOPIC_UPDATE"), "update_chat_topic")
-	setTasks(os.Getenv("LLM_MAX_COMPLETION_TOKENS_TOPIC_REBUILD"), "rebuild_chat_topic")
-	setTasks(os.Getenv("LLM_MAX_COMPLETION_TOKENS_PROFILE_UPDATE"), "update_participant_profile")
-	setTasks(os.Getenv("LLM_MAX_COMPLETION_TOKENS_PROFILE_REBUILD"), "rebuild_participant_profile")
+	setTasks(os.Getenv("LLM_MAX_COMPLETION_TOKENS_TOPIC"), "update_chat_topic", "classify_message_topic")
+	setTasks(os.Getenv("LLM_MAX_COMPLETION_TOKENS_PROFILE"), "update_participant_profile")
 	return limits
 }
 

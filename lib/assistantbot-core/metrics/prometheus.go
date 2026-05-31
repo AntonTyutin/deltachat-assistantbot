@@ -13,24 +13,28 @@ import (
 const namespace = "dc_assistantbot"
 
 var llmBuckets = []float64{.05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120}
+var toolCallCountBuckets = []float64{0, 1, 2, 3, 5, 8, 13, 21}
 
 // Prometheus implements Recorder using Prometheus collectors.
 type Prometheus struct {
-	botID                string
-	llmRequests          *prometheus.CounterVec
-	llmDuration          *prometheus.HistogramVec
-	llmPromptTokens      *prometheus.CounterVec
-	llmCompletionTokens  *prometheus.CounterVec
-	llmTotalTokens       *prometheus.CounterVec
-	mcpCalls             *prometheus.CounterVec
-	mcpDuration          *prometheus.HistogramVec
-	replyGenerate        *prometheus.HistogramVec
-	messagePhase         *prometheus.HistogramVec
-	inboundMessageHandle *prometheus.HistogramVec
-	chatMemoryQueueDepth *prometheus.GaugeVec
-	chatMemoryQueueWait  *prometheus.HistogramVec
-	chatMemoryTaskDur    *prometheus.HistogramVec
-	serviceStarted       *prometheus.CounterVec
+	botID                       string
+	llmRequests                 *prometheus.CounterVec
+	llmDuration                 *prometheus.HistogramVec
+	llmPromptTokens             *prometheus.CounterVec
+	llmCompletionTokens         *prometheus.CounterVec
+	llmTotalTokens              *prometheus.CounterVec
+	mcpCalls                    *prometheus.CounterVec
+	mcpDuration                 *prometheus.HistogramVec
+	replyGenerate               *prometheus.HistogramVec
+	messagePhase                *prometheus.HistogramVec
+	inboundMessageHandle        *prometheus.HistogramVec
+	chatMemoryQueueDepth        *prometheus.GaugeVec
+	chatMemoryQueueWait         *prometheus.HistogramVec
+	chatMemoryTaskDur           *prometheus.HistogramVec
+	replyToolCalls              *prometheus.CounterVec
+	replyToolCallDuration       *prometheus.HistogramVec
+	inboundMessageToolCallCount *prometheus.HistogramVec
+	serviceStarted              *prometheus.CounterVec
 }
 
 // NewPrometheus registers all metric collectors with reg, records one service_started
@@ -154,6 +158,32 @@ func NewPrometheus(reg prometheus.Registerer, botID, version string) *Prometheus
 			},
 			[]string{"bot_id", "queue"},
 		),
+		replyToolCalls: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "reply_tool_calls_total",
+				Help:      "Tool invocations during reply generation, by source (memory or mcp), tool name, and outcome.",
+			},
+			[]string{"bot_id", "source", "tool", "outcome"},
+		),
+		replyToolCallDuration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: namespace,
+				Name:      "reply_tool_call_duration_seconds",
+				Help:      "Latency of reply-path tool calls (memory and MCP).",
+				Buckets:   llmBuckets,
+			},
+			[]string{"bot_id", "source", "tool"},
+		),
+		inboundMessageToolCallCount: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: namespace,
+				Name:      "inbound_message_reply_tool_calls",
+				Help:      "Number of reply-path tool calls per inbound message, by source (memory or mcp).",
+				Buckets:   toolCallCountBuckets,
+			},
+			[]string{"bot_id", "source"},
+		),
 		serviceStarted: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: namespace,
@@ -178,6 +208,9 @@ func NewPrometheus(reg prometheus.Registerer, botID, version string) *Prometheus
 		p.chatMemoryQueueDepth,
 		p.chatMemoryQueueWait,
 		p.chatMemoryTaskDur,
+		p.replyToolCalls,
+		p.replyToolCallDuration,
+		p.inboundMessageToolCallCount,
 		p.serviceStarted,
 	)
 	version = strings.TrimSpace(version)
@@ -243,6 +276,15 @@ func (p *Prometheus) RecordChatMemoryQueueWait(queue string, dur time.Duration) 
 
 func (p *Prometheus) RecordChatMemoryTaskDuration(queue string, dur time.Duration) {
 	p.chatMemoryTaskDur.WithLabelValues(p.botID, queue).Observe(dur.Seconds())
+}
+
+func (p *Prometheus) RecordReplyToolCall(source, tool, outcome string, dur time.Duration) {
+	p.replyToolCalls.WithLabelValues(p.botID, source, tool, outcome).Inc()
+	p.replyToolCallDuration.WithLabelValues(p.botID, source, tool).Observe(dur.Seconds())
+}
+
+func (p *Prometheus) RecordInboundMessageToolCallCount(source string, count int) {
+	p.inboundMessageToolCallCount.WithLabelValues(p.botID, source).Observe(float64(count))
 }
 
 func classifyAPIOutcome(err error) string {

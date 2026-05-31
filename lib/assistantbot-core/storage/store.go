@@ -3,29 +3,43 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/asg017/sqlite-vec-go-bindings/ncruces"
+	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/vfs/adiantum"
 )
 
 type Store struct {
+	mu     sync.Mutex
 	db     *sql.DB
-	cipher *Cipher
+	opts   Options
+	secret string
 }
 
-func Open(ctx context.Context, path, secret string) (*Store, error) {
-	cipher, err := NewCipher(secret)
-	if err != nil {
-		return nil, err
+func Open(ctx context.Context, path, secret string, opts Options) (*Store, error) {
+	opts = opts.withDefaults()
+	if strings.TrimSpace(secret) == "" {
+		return nil, fmt.Errorf("database encryption key is required")
 	}
-	db, err := sql.Open("sqlite", path)
+	dsn := fmt.Sprintf("file:%s?vfs=adiantum&_pragma=temp_store(memory)", url.PathEscape(filepath.ToSlash(path)))
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db, cipher: cipher}
+	store := &Store{db: db, opts: opts, secret: secret}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("PRAGMA textkey = '%s'", escapeSQLString(secret))); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set encryption key: %w", err)
+	}
 	if err := store.Migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -34,63 +48,115 @@ func Open(ctx context.Context, path, secret string) (*Store, error) {
 }
 
 func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.db.Close()
 }
 
+func (s *Store) RecentMessagesLimit() int {
+	return s.opts.RecentMessagesLimit
+}
+
 func (s *Store) Migrate(ctx context.Context) error {
+	dim := s.opts.EmbeddingDimensions
 	statements := []string{
 		`PRAGMA journal_mode=WAL;`,
 		`CREATE TABLE IF NOT EXISTS participants (
 			id TEXT PRIMARY KEY,
-			payload BLOB NOT NULL,
+			names TEXT NOT NULL DEFAULT '{}',
+			city TEXT NOT NULL DEFAULT '',
+			address TEXT NOT NULL DEFAULT '',
+			timezone TEXT NOT NULL DEFAULT '',
+			style TEXT NOT NULL DEFAULT '',
+			verbosity TEXT NOT NULL DEFAULT '',
+			expertise TEXT NOT NULL DEFAULT '{}',
+			interests TEXT NOT NULL DEFAULT '[]',
 			updated_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS chat_names (
 			chat_id TEXT NOT NULL,
 			participant_id TEXT NOT NULL,
-			payload BLOB NOT NULL,
+			name TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY (chat_id, participant_id)
 		);`,
 		`CREATE TABLE IF NOT EXISTS chats (
 			id TEXT PRIMARY KEY,
-			payload BLOB NOT NULL,
+			is_group INTEGER NOT NULL DEFAULT 0,
+			title TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS messages (
+			rowid INTEGER PRIMARY KEY,
 			chat_id TEXT NOT NULL,
 			id TEXT NOT NULL,
 			sender_id TEXT NOT NULL,
+			sender TEXT NOT NULL DEFAULT '',
+			text TEXT NOT NULL,
+			is_group INTEGER NOT NULL DEFAULT 0,
+			is_from_self INTEGER NOT NULL DEFAULT 0,
 			reply_to_id TEXT,
+			topic_id TEXT,
 			sent_at TEXT NOT NULL,
-			payload BLOB NOT NULL,
-			PRIMARY KEY (chat_id, id)
+			UNIQUE(chat_id, id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_chat_sent_at ON messages(chat_id, sent_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_chat_topic ON messages(chat_id, topic_id, sent_at);`,
 		`CREATE TABLE IF NOT EXISTS topics (
-			id TEXT PRIMARY KEY,
+			rowid INTEGER PRIMARY KEY,
+			id TEXT NOT NULL UNIQUE,
 			chat_id TEXT NOT NULL,
-			payload BLOB NOT NULL,
+			title TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			decisions TEXT NOT NULL DEFAULT '[]',
+			open_questions TEXT NOT NULL DEFAULT '[]',
+			active_participants TEXT NOT NULL DEFAULT '[]',
 			updated_at TEXT NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_topics_chat_updated_at ON topics(chat_id, updated_at DESC);`,
-		`CREATE TABLE IF NOT EXISTS message_topics (
+		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_messages USING vec0(
+			embedding float[%d],
+			chat_id TEXT partition key
+		);`, dim),
+		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_topics USING vec0(
+			embedding float[%d],
+			chat_id TEXT partition key
+		);`, dim),
+		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_lists USING vec0(
+			embedding float[%d],
+			chat_id TEXT partition key
+		);`, dim),
+		`CREATE TABLE IF NOT EXISTS lists (
+			id TEXT PRIMARY KEY,
 			chat_id TEXT NOT NULL,
-			message_id TEXT NOT NULL,
-			topic_id TEXT NOT NULL,
-			PRIMARY KEY (chat_id, message_id)
+			kind TEXT NOT NULL,
+			title TEXT NOT NULL,
+			updated_at TEXT NOT NULL
 		);`,
-		`CREATE TABLE IF NOT EXISTS daily_summaries (
+		`CREATE INDEX IF NOT EXISTS idx_lists_chat ON lists(chat_id, updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS list_items (
+			id TEXT PRIMARY KEY,
+			list_id TEXT NOT NULL,
+			text TEXT NOT NULL,
+			created_by TEXT NOT NULL,
+			done INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_list_items_list ON list_items(list_id, created_at);`,
+		`CREATE TABLE IF NOT EXISTS reminders (
+			id TEXT PRIMARY KEY,
 			chat_id TEXT NOT NULL,
-			date TEXT NOT NULL,
-			payload BLOB NOT NULL,
-			created_at TEXT NOT NULL,
-			PRIMARY KEY (chat_id, date)
+			requester_id TEXT NOT NULL,
+			due_at TEXT NOT NULL,
+			text TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			created_at TEXT NOT NULL
 		);`,
+		`CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_at);`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
-			return err
+			return fmt.Errorf("migrate: %w", err)
 		}
 	}
 	return nil
@@ -98,32 +164,30 @@ func (s *Store) Migrate(ctx context.Context) error {
 
 func (s *Store) UpsertChat(ctx context.Context, chat Chat) error {
 	chat.UpdatedAt = chat.UpdatedAt.UTC()
-	payload, err := s.cipher.SealJSON(chat)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO chats(id, payload, updated_at)
-		VALUES(?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
-		chat.ID, payload, chat.UpdatedAt.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO chats(id, is_group, title, updated_at)
+		VALUES(?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET is_group = excluded.is_group, title = excluded.title, updated_at = excluded.updated_at`,
+		chat.ID, boolInt(chat.IsGroup), chat.Title, chat.UpdatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
 func (s *Store) ListChats(ctx context.Context) ([]Chat, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT payload FROM chats ORDER BY updated_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, is_group, title, updated_at FROM chats ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var chats []Chat
 	for rows.Next() {
-		var payload []byte
-		if err := rows.Scan(&payload); err != nil {
+		var chat Chat
+		var isGroup int
+		var updatedAt string
+		if err := rows.Scan(&chat.ID, &isGroup, &chat.Title, &updatedAt); err != nil {
 			return nil, err
 		}
-		var chat Chat
-		if err := s.cipher.OpenJSON(payload, &chat); err != nil {
+		chat.IsGroup = isGroup != 0
+		chat.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+		if err != nil {
 			return nil, err
 		}
 		chats = append(chats, chat)
@@ -138,104 +202,178 @@ func (s *Store) UpsertProfile(ctx context.Context, profile ParticipantProfile) e
 	if profile.Expertise == nil {
 		profile.Expertise = map[string]string{}
 	}
+	if profile.Interests == nil {
+		profile.Interests = []string{}
+	}
 	profile.UpdatedAt = profile.UpdatedAt.UTC()
-	payload, err := s.cipher.SealJSON(profile)
+	namesJSON, err := json.Marshal(profile.Names)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO participants(id, payload, updated_at)
-		VALUES(?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
-		profile.ID, payload, profile.UpdatedAt.Format(time.RFC3339Nano))
+	expertiseJSON, err := json.Marshal(profile.Expertise)
+	if err != nil {
+		return err
+	}
+	interestsJSON, err := json.Marshal(profile.Interests)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO participants(id, names, city, address, timezone, style, verbosity, expertise, interests, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			names = excluded.names,
+			city = excluded.city,
+			address = excluded.address,
+			timezone = excluded.timezone,
+			style = excluded.style,
+			verbosity = excluded.verbosity,
+			expertise = excluded.expertise,
+			interests = excluded.interests,
+			updated_at = excluded.updated_at`,
+		profile.ID, string(namesJSON), profile.City, profile.Address, profile.Timezone,
+		profile.Style, profile.Verbosity, string(expertiseJSON), string(interestsJSON),
+		profile.UpdatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
 func (s *Store) GetProfile(ctx context.Context, id string) (ParticipantProfile, bool, error) {
-	var payload []byte
-	err := s.db.QueryRowContext(ctx, `SELECT payload FROM participants WHERE id = ?`, id).Scan(&payload)
+	var profile ParticipantProfile
+	var namesJSON, expertiseJSON, interestsJSON, updatedAt string
+	err := s.db.QueryRowContext(ctx, `SELECT names, city, address, timezone, style, verbosity, expertise, interests, updated_at
+		FROM participants WHERE id = ?`, id).Scan(
+		&namesJSON, &profile.City, &profile.Address, &profile.Timezone,
+		&profile.Style, &profile.Verbosity, &expertiseJSON, &interestsJSON, &updatedAt,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ParticipantProfile{}, false, nil
 	}
 	if err != nil {
 		return ParticipantProfile{}, false, err
 	}
-	var profile ParticipantProfile
-	if err := s.cipher.OpenJSON(payload, &profile); err != nil {
+	profile.ID = id
+	if err := json.Unmarshal([]byte(namesJSON), &profile.Names); err != nil {
+		return ParticipantProfile{}, false, err
+	}
+	if err := json.Unmarshal([]byte(expertiseJSON), &profile.Expertise); err != nil {
+		return ParticipantProfile{}, false, err
+	}
+	if err := json.Unmarshal([]byte(interestsJSON), &profile.Interests); err != nil {
+		return ParticipantProfile{}, false, err
+	}
+	profile.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
 		return ParticipantProfile{}, false, err
 	}
 	return profile, true, nil
 }
 
 func (s *Store) SetChatName(ctx context.Context, chatID, participantID, name string) error {
-	payload, err := s.cipher.SealJSON(map[string]string{"name": name})
-	if err != nil {
-		return err
-	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.db.ExecContext(ctx, `INSERT INTO chat_names(chat_id, participant_id, payload, updated_at)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO chat_names(chat_id, participant_id, name, updated_at)
 		VALUES(?, ?, ?, ?)
-		ON CONFLICT(chat_id, participant_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
-		chatID, participantID, payload, now)
+		ON CONFLICT(chat_id, participant_id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at`,
+		chatID, participantID, name, now)
 	return err
 }
 
 func (s *Store) ChatName(ctx context.Context, chatID, participantID string) (string, bool, error) {
-	var payload []byte
-	err := s.db.QueryRowContext(ctx, `SELECT payload FROM chat_names WHERE chat_id = ? AND participant_id = ?`, chatID, participantID).Scan(&payload)
+	var name string
+	err := s.db.QueryRowContext(ctx, `SELECT name FROM chat_names WHERE chat_id = ? AND participant_id = ?`, chatID, participantID).Scan(&name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
-	if err != nil {
-		return "", false, err
-	}
-	var decoded map[string]string
-	if err := s.cipher.OpenJSON(payload, &decoded); err != nil {
-		return "", false, err
-	}
-	return decoded["name"], true, nil
+	return name, err == nil, err
 }
 
-func (s *Store) UpsertMessage(ctx context.Context, message Message) error {
+func (s *Store) UpsertMessage(ctx context.Context, message Message, embedding []float32) error {
 	if message.SentAt.IsZero() {
 		message.SentAt = time.Now()
 	}
 	message.SentAt = message.SentAt.UTC()
-	payload, err := s.cipher.SealJSON(message)
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `INSERT INTO messages(chat_id, id, sender_id, reply_to_id, sent_at, payload)
-		VALUES(?, ?, ?, ?, ?, ?)
-		ON CONFLICT(chat_id, id) DO UPDATE SET sender_id = excluded.sender_id, reply_to_id = excluded.reply_to_id, sent_at = excluded.sent_at, payload = excluded.payload`,
-		message.ChatID, message.ID, message.SenderID, nullable(message.ReplyToID), message.SentAt.Format(time.RFC3339Nano), payload); err != nil {
+	var rowid int64
+	err = tx.QueryRowContext(ctx, `SELECT rowid FROM messages WHERE chat_id = ? AND id = ?`, message.ChatID, message.ID).Scan(&rowid)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		res, err := tx.ExecContext(ctx, `INSERT INTO messages(chat_id, id, sender_id, sender, text, is_group, is_from_self, reply_to_id, topic_id, sent_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			message.ChatID, message.ID, message.SenderID, message.Sender, message.Text,
+			boolInt(message.IsGroup), boolInt(message.IsFromSelf), nullable(message.ReplyToID), nullable(message.TopicID),
+			message.SentAt.Format(time.RFC3339Nano))
+		if err != nil {
+			return err
+		}
+		rowid, err = res.LastInsertId()
+		if err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	default:
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET sender_id = ?, sender = ?, text = ?, is_group = ?, is_from_self = ?, reply_to_id = ?, topic_id = ?, sent_at = ?
+			WHERE rowid = ?`,
+			message.SenderID, message.Sender, message.Text, boolInt(message.IsGroup), boolInt(message.IsFromSelf),
+			nullable(message.ReplyToID), nullable(message.TopicID), message.SentAt.Format(time.RFC3339Nano), rowid); err != nil {
+			return err
+		}
+	}
+
+	if len(embedding) > 0 {
+		vecArg, err := embeddingArg(embedding)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM vec_messages WHERE rowid = ?`, rowid); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO vec_messages(rowid, embedding, chat_id) VALUES(?, ?, ?)`,
+			rowid, vecArg, message.ChatID); err != nil {
+			return err
+		}
+	}
+
+	limit := s.opts.RecentMessagesLimit
+	staleSubquery := `SELECT rowid FROM messages WHERE chat_id = ? ORDER BY sent_at DESC LIMIT -1 OFFSET ?`
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vec_messages WHERE rowid IN (`+staleSubquery+`)`, message.ChatID, limit); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM messages
-		WHERE chat_id = ? AND id NOT IN (
-			SELECT id FROM messages WHERE chat_id = ? ORDER BY sent_at DESC LIMIT 20
-		)`, message.ChatID, message.ChatID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE rowid IN (`+staleSubquery+`)`, message.ChatID, limit); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
 func (s *Store) GetMessage(ctx context.Context, chatID, messageID string) (Message, bool, error) {
-	var payload []byte
-	err := s.db.QueryRowContext(ctx, `SELECT payload FROM messages WHERE chat_id = ? AND id = ?`, chatID, messageID).Scan(&payload)
+	var message Message
+	var isGroup, isFromSelf int
+	var replyToID, topicID sql.NullString
+	var sentAt string
+	err := s.db.QueryRowContext(ctx, `SELECT id, chat_id, sender_id, sender, text, is_group, is_from_self, reply_to_id, topic_id, sent_at
+		FROM messages WHERE chat_id = ? AND id = ?`, chatID, messageID).Scan(
+		&message.ID, &message.ChatID, &message.SenderID, &message.Sender, &message.Text,
+		&isGroup, &isFromSelf, &replyToID, &topicID, &sentAt,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, nil
 	}
 	if err != nil {
 		return Message{}, false, err
 	}
-	var message Message
-	if err := s.cipher.OpenJSON(payload, &message); err != nil {
+	message.IsGroup = isGroup != 0
+	message.IsFromSelf = isFromSelf != 0
+	if replyToID.Valid {
+		message.ReplyToID = replyToID.String
+	}
+	if topicID.Valid {
+		message.TopicID = topicID.String
+	}
+	message.SentAt, err = time.Parse(time.RFC3339Nano, sentAt)
+	if err != nil {
 		return Message{}, false, err
 	}
 	return message, true, nil
@@ -247,50 +385,50 @@ func (s *Store) DeleteMessage(ctx context.Context, chatID, messageID string) err
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM message_topics WHERE chat_id = ? AND message_id = ?`, chatID, messageID); err != nil {
+	var rowid int64
+	err = tx.QueryRowContext(ctx, `SELECT rowid FROM messages WHERE chat_id = ? AND id = ?`, chatID, messageID).Scan(&rowid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE chat_id = ? AND id = ?`, chatID, messageID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vec_messages WHERE rowid = ?`, rowid); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE rowid = ?`, rowid); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
 func (s *Store) TopicIDForMessage(ctx context.Context, chatID, messageID string) (string, bool, error) {
-	var topicID string
-	err := s.db.QueryRowContext(ctx, `SELECT topic_id FROM message_topics WHERE chat_id = ? AND message_id = ?`, chatID, messageID).Scan(&topicID)
+	var topicID sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT topic_id FROM messages WHERE chat_id = ? AND id = ?`, chatID, messageID).Scan(&topicID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
 	if err != nil {
 		return "", false, err
 	}
-	return topicID, true, nil
+	if !topicID.Valid || topicID.String == "" {
+		return "", false, nil
+	}
+	return topicID.String, true, nil
 }
 
 func (s *Store) RecentMessages(ctx context.Context, chatID string, limit int) ([]Message, error) {
 	if limit <= 0 {
-		limit = 20
+		limit = s.opts.RecentMessagesLimit
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT payload FROM messages WHERE chat_id = ? ORDER BY sent_at DESC LIMIT ?`, chatID, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, chat_id, sender_id, sender, text, is_group, is_from_self, reply_to_id, topic_id, sent_at
+		FROM messages WHERE chat_id = ? ORDER BY sent_at DESC LIMIT ?`, chatID, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
-	var reverse []Message
-	for rows.Next() {
-		var payload []byte
-		if err := rows.Scan(&payload); err != nil {
-			return nil, err
-		}
-		var message Message
-		if err := s.cipher.OpenJSON(payload, &message); err != nil {
-			return nil, err
-		}
-		reverse = append(reverse, message)
-	}
-	if err := rows.Err(); err != nil {
+	reverse, err := scanMessages(rows)
+	if err != nil {
 		return nil, err
 	}
 	for i, j := 0, len(reverse)-1; i < j; i, j = i+1, j-1 {
@@ -300,84 +438,189 @@ func (s *Store) RecentMessages(ctx context.Context, chatID string, limit int) ([
 }
 
 func (s *Store) TopicMessages(ctx context.Context, chatID, topicID string) ([]Message, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT messages.payload
-		FROM messages
-		INNER JOIN message_topics ON message_topics.chat_id = messages.chat_id AND message_topics.message_id = messages.id
-		WHERE messages.chat_id = ? AND message_topics.topic_id = ?
-		ORDER BY messages.sent_at ASC`, chatID, topicID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, chat_id, sender_id, sender, text, is_group, is_from_self, reply_to_id, topic_id, sent_at
+		FROM messages WHERE chat_id = ? AND topic_id = ? ORDER BY sent_at ASC`, chatID, topicID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return s.decodeMessages(rows)
+	return scanMessages(rows)
 }
 
-func (s *Store) ParticipantMessages(ctx context.Context, participantID string, limit int) ([]Message, error) {
-	if limit <= 0 {
-		limit = 100
+func (s *Store) NearestMessages(ctx context.Context, chatID string, embedding []float32, limit int) ([]NearestMessage, error) {
+	if limit <= 0 || len(embedding) == 0 {
+		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT payload FROM messages WHERE sender_id = ? ORDER BY sent_at DESC LIMIT ?`, participantID, limit)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	vecQuery, err := embeddingArg(embedding)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// vec0 MATCH/k panics in ncruces WASM (vec0Filter OOB) even with SerializeFloat32 and CTE.
+	// Brute-force distance over the chat partition is acceptable while RECENT_MESSAGES_LIMIT is small.
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id, m.chat_id, m.sender_id, m.sender, m.text, m.is_group, m.is_from_self, m.reply_to_id, m.topic_id, m.sent_at,
+		vec_distance_L2(v.embedding, ?) AS distance
+		FROM vec_messages v
+		INNER JOIN messages m ON m.rowid = v.rowid
+		WHERE v.chat_id = ?
+		ORDER BY distance
+		LIMIT ?`, vecQuery, chatID, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	messages, err := s.decodeMessages(rows)
-	if err != nil {
-		return nil, err
-	}
-	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-		messages[i], messages[j] = messages[j], messages[i]
-	}
-	return messages, nil
-}
-
-func (s *Store) decodeMessages(rows *sql.Rows) ([]Message, error) {
-	var messages []Message
+	var out []NearestMessage
 	for rows.Next() {
-		var payload []byte
-		if err := rows.Scan(&payload); err != nil {
-			return nil, err
-		}
 		var message Message
-		if err := s.cipher.OpenJSON(payload, &message); err != nil {
+		var isGroup, isFromSelf int
+		var replyToID, topicID sql.NullString
+		var sentAt string
+		var distance float64
+		if err := rows.Scan(&message.ID, &message.ChatID, &message.SenderID, &message.Sender, &message.Text,
+			&isGroup, &isFromSelf, &replyToID, &topicID, &sentAt, &distance); err != nil {
 			return nil, err
 		}
-		messages = append(messages, message)
+		message.IsGroup = isGroup != 0
+		message.IsFromSelf = isFromSelf != 0
+		if replyToID.Valid {
+			message.ReplyToID = replyToID.String
+		}
+		if topicID.Valid {
+			message.TopicID = topicID.String
+		}
+		message.SentAt, err = time.Parse(time.RFC3339Nano, sentAt)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, NearestMessage{Message: message, Distance: distance})
 	}
-	return messages, rows.Err()
+	return out, rows.Err()
 }
 
-func (s *Store) UpsertTopic(ctx context.Context, topic Topic) error {
+func (s *Store) NearestTopics(ctx context.Context, chatID string, embedding []float32, limit int) ([]NearestTopic, error) {
+	if limit <= 0 || len(embedding) == 0 {
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	vecQuery, err := embeddingArg(embedding)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.chat_id, t.title, t.summary, t.decisions, t.open_questions, t.active_participants, t.updated_at,
+		vec_distance_L2(v.embedding, ?) AS distance
+		FROM vec_topics v
+		INNER JOIN topics t ON t.rowid = v.rowid
+		WHERE v.chat_id = ?
+		ORDER BY distance
+		LIMIT ?`, vecQuery, chatID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []NearestTopic
+	for rows.Next() {
+		topic, distance, err := scanTopicRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, NearestTopic{Topic: topic, Distance: distance})
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpsertTopic(ctx context.Context, topic Topic, embedding []float32) error {
 	topic.UpdatedAt = topic.UpdatedAt.UTC()
-	payload, err := s.cipher.SealJSON(topic)
+	if topic.Decisions == nil {
+		topic.Decisions = []string{}
+	}
+	if topic.OpenQuestions == nil {
+		topic.OpenQuestions = []string{}
+	}
+	if topic.ActiveParticipants == nil {
+		topic.ActiveParticipants = []string{}
+	}
+	decisionsJSON, err := json.Marshal(topic.Decisions)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO topics(id, chat_id, payload, updated_at)
-		VALUES(?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET chat_id = excluded.chat_id, payload = excluded.payload, updated_at = excluded.updated_at`,
-		topic.ID, topic.ChatID, payload, topic.UpdatedAt.Format(time.RFC3339Nano))
-	return err
+	openQuestionsJSON, err := json.Marshal(topic.OpenQuestions)
+	if err != nil {
+		return err
+	}
+	participantsJSON, err := json.Marshal(topic.ActiveParticipants)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var rowid int64
+	err = tx.QueryRowContext(ctx, `SELECT rowid FROM topics WHERE id = ?`, topic.ID).Scan(&rowid)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		res, err := tx.ExecContext(ctx, `INSERT INTO topics(id, chat_id, title, summary, decisions, open_questions, active_participants, updated_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+			topic.ID, topic.ChatID, topic.Title, topic.Summary, string(decisionsJSON), string(openQuestionsJSON),
+			string(participantsJSON), topic.UpdatedAt.Format(time.RFC3339Nano))
+		if err != nil {
+			return err
+		}
+		rowid, err = res.LastInsertId()
+		if err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	default:
+		if _, err := tx.ExecContext(ctx, `UPDATE topics SET chat_id = ?, title = ?, summary = ?, decisions = ?, open_questions = ?, active_participants = ?, updated_at = ?
+			WHERE rowid = ?`,
+			topic.ChatID, topic.Title, topic.Summary, string(decisionsJSON), string(openQuestionsJSON),
+			string(participantsJSON), topic.UpdatedAt.Format(time.RFC3339Nano), rowid); err != nil {
+			return err
+		}
+	}
+
+	if len(embedding) > 0 {
+		vecArg, err := embeddingArg(embedding)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM vec_topics WHERE rowid = ?`, rowid); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO vec_topics(rowid, embedding, chat_id) VALUES(?, ?, ?)`,
+			rowid, vecArg, topic.ChatID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ListTopics(ctx context.Context, chatID string, limit int) ([]Topic, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT payload FROM topics WHERE chat_id = ? ORDER BY updated_at DESC LIMIT ?`, chatID, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, chat_id, title, summary, decisions, open_questions, active_participants, updated_at
+		FROM topics WHERE chat_id = ? ORDER BY updated_at DESC LIMIT ?`, chatID, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var topics []Topic
 	for rows.Next() {
-		var payload []byte
-		if err := rows.Scan(&payload); err != nil {
-			return nil, err
-		}
-		var topic Topic
-		if err := s.cipher.OpenJSON(payload, &topic); err != nil {
+		topic, _, err := scanTopicRowNoDistance(rows)
+		if err != nil {
 			return nil, err
 		}
 		topics = append(topics, topic)
@@ -389,55 +632,326 @@ func (s *Store) TopicForReply(ctx context.Context, chatID, replyToID string) (To
 	if replyToID == "" {
 		return Topic{}, false, nil
 	}
-	var topicID string
-	err := s.db.QueryRowContext(ctx, `SELECT topic_id FROM message_topics WHERE chat_id = ? AND message_id = ?`, chatID, replyToID).Scan(&topicID)
-	if errors.Is(err, sql.ErrNoRows) {
+	var topicID sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT topic_id FROM messages WHERE chat_id = ? AND id = ?`, chatID, replyToID).Scan(&topicID)
+	if errors.Is(err, sql.ErrNoRows) || !topicID.Valid || topicID.String == "" {
 		return Topic{}, false, nil
 	}
 	if err != nil {
 		return Topic{}, false, err
 	}
-	return s.GetTopic(ctx, topicID)
+	return s.GetTopic(ctx, topicID.String)
 }
 
 func (s *Store) GetTopic(ctx context.Context, id string) (Topic, bool, error) {
-	var payload []byte
-	err := s.db.QueryRowContext(ctx, `SELECT payload FROM topics WHERE id = ?`, id).Scan(&payload)
+	row := s.db.QueryRowContext(ctx, `SELECT id, chat_id, title, summary, decisions, open_questions, active_participants, updated_at
+		FROM topics WHERE id = ?`, id)
+	topic, err := scanTopic(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Topic{}, false, nil
 	}
 	if err != nil {
-		return Topic{}, false, err
-	}
-	var topic Topic
-	if err := s.cipher.OpenJSON(payload, &topic); err != nil {
 		return Topic{}, false, err
 	}
 	return topic, true, nil
 }
 
-func (s *Store) AttachMessageToTopic(ctx context.Context, chatID, messageID, topicID string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO message_topics(chat_id, message_id, topic_id)
-		VALUES(?, ?, ?)
-		ON CONFLICT(chat_id, message_id) DO UPDATE SET topic_id = excluded.topic_id`,
-		chatID, messageID, topicID)
-	return err
-}
-
-func (s *Store) SaveDailySummary(ctx context.Context, summary DailySummary) error {
-	if summary.CreatedAt.IsZero() {
-		summary.CreatedAt = time.Now()
-	}
-	summary.CreatedAt = summary.CreatedAt.UTC()
-	payload, err := s.cipher.SealJSON(summary)
+func (s *Store) UpsertList(ctx context.Context, list List, embedding []float32) error {
+	list.UpdatedAt = list.UpdatedAt.UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO daily_summaries(chat_id, date, payload, created_at)
-		VALUES(?, ?, ?, ?)
-		ON CONFLICT(chat_id, date) DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at`,
-		summary.ChatID, summary.Date, payload, summary.CreatedAt.Format(time.RFC3339Nano))
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `INSERT INTO lists(id, chat_id, kind, title, updated_at)
+		VALUES(?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, title = excluded.title, updated_at = excluded.updated_at`,
+		list.ID, list.ChatID, string(list.Kind), list.Title, list.UpdatedAt.Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	var rowid int64
+	if err := tx.QueryRowContext(ctx, `SELECT rowid FROM lists WHERE id = ?`, list.ID).Scan(&rowid); err != nil {
+		return err
+	}
+	if len(embedding) > 0 {
+		vecArg, err := embeddingArg(embedding)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM vec_lists WHERE rowid = ?`, rowid); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO vec_lists(rowid, embedding, chat_id) VALUES(?, ?, ?)`,
+			rowid, vecArg, list.ChatID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) NearestLists(ctx context.Context, chatID string, embedding []float32, limit int) ([]NearestList, error) {
+	if limit <= 0 || len(embedding) == 0 {
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	vecQuery, err := embeddingArg(embedding)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT l.id, l.chat_id, l.kind, l.title, l.updated_at,
+		vec_distance_L2(v.embedding, ?) AS distance
+		FROM vec_lists v
+		INNER JOIN lists l ON l.rowid = v.rowid
+		WHERE v.chat_id = ?
+		ORDER BY distance
+		LIMIT ?`, vecQuery, chatID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []NearestList
+	for rows.Next() {
+		var list List
+		var kindRaw, updatedAt string
+		var distance float64
+		if err := rows.Scan(&list.ID, &list.ChatID, &kindRaw, &list.Title, &updatedAt, &distance); err != nil {
+			return nil, err
+		}
+		list.Kind = ListKind(kindRaw)
+		list.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, NearestList{List: list, Distance: distance})
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListLists(ctx context.Context, chatID string, kind ListKind) ([]List, error) {
+	query := `SELECT id, chat_id, kind, title, updated_at FROM lists WHERE chat_id = ?`
+	args := []any{chatID}
+	if kind != "" {
+		query += ` AND kind = ?`
+		args = append(args, string(kind))
+	}
+	query += ` ORDER BY updated_at DESC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var lists []List
+	for rows.Next() {
+		var list List
+		var kindRaw, updatedAt string
+		if err := rows.Scan(&list.ID, &list.ChatID, &kindRaw, &list.Title, &updatedAt); err != nil {
+			return nil, err
+		}
+		list.Kind = ListKind(kindRaw)
+		list.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		lists = append(lists, list)
+	}
+	return lists, rows.Err()
+}
+
+func (s *Store) GetList(ctx context.Context, listID string) (List, bool, error) {
+	var list List
+	var kindRaw, updatedAt string
+	err := s.db.QueryRowContext(ctx, `SELECT id, chat_id, kind, title, updated_at FROM lists WHERE id = ?`, listID).
+		Scan(&list.ID, &list.ChatID, &kindRaw, &list.Title, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return List{}, false, nil
+	}
+	if err != nil {
+		return List{}, false, err
+	}
+	list.Kind = ListKind(kindRaw)
+	list.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return List{}, false, err
+	}
+	return list, true, nil
+}
+
+func (s *Store) FindListByTitle(ctx context.Context, chatID, title string, kind ListKind) (List, bool, error) {
+	var list List
+	var kindRaw, updatedAt string
+	err := s.db.QueryRowContext(ctx, `SELECT id, chat_id, kind, title, updated_at FROM lists
+		WHERE chat_id = ? AND lower(title) = lower(?) AND kind = ?`, chatID, title, string(kind)).
+		Scan(&list.ID, &list.ChatID, &kindRaw, &list.Title, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return List{}, false, nil
+	}
+	if err != nil {
+		return List{}, false, err
+	}
+	list.Kind = ListKind(kindRaw)
+	list.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return List{}, false, err
+	}
+	return list, true, nil
+}
+
+func (s *Store) AddListItem(ctx context.Context, item ListItem) error {
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now()
+	}
+	item.CreatedAt = item.CreatedAt.UTC()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO list_items(id, list_id, text, created_by, done, created_at)
+		VALUES(?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET text = excluded.text, done = excluded.done`,
+		item.ID, item.ListID, item.Text, item.CreatedBy, boolInt(item.Done), item.CreatedAt.Format(time.RFC3339Nano))
 	return err
+}
+
+func (s *Store) ListItems(ctx context.Context, listID string) ([]ListItem, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, list_id, text, created_by, done, created_at
+		FROM list_items WHERE list_id = ? ORDER BY created_at ASC`, listID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListItem
+	for rows.Next() {
+		var item ListItem
+		var done int
+		var createdAt string
+		if err := rows.Scan(&item.ID, &item.ListID, &item.Text, &item.CreatedBy, &done, &createdAt); err != nil {
+			return nil, err
+		}
+		item.Done = done != 0
+		item.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) DeleteListItems(ctx context.Context, listID string, itemIDs []string) (int, error) {
+	if len(itemIDs) == 0 {
+		return 0, nil
+	}
+	query, args := inClauseQuery(`DELETE FROM list_items WHERE list_id = ? AND id IN `, listID, itemIDs)
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+func (s *Store) SetListItemsDone(ctx context.Context, listID string, itemIDs []string, done bool) (int, error) {
+	if len(itemIDs) == 0 {
+		return 0, nil
+	}
+	query, args := inClauseQuery(`UPDATE list_items SET done = ? WHERE list_id = ? AND id IN `, boolInt(done), listID, itemIDs)
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+func inClauseQuery(prefix string, leadingArgs ...any) (string, []any) {
+	var ids []string
+	switch last := leadingArgs[len(leadingArgs)-1].(type) {
+	case []string:
+		ids = last
+		leadingArgs = leadingArgs[:len(leadingArgs)-1]
+	default:
+		panic("inClauseQuery: last argument must be []string")
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(leadingArgs)+len(ids))
+	args = append(args, leadingArgs...)
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	return prefix + "(" + strings.Join(placeholders, ", ") + ")", args
+}
+
+func (s *Store) UpsertReminder(ctx context.Context, reminder Reminder) error {
+	if reminder.CreatedAt.IsZero() {
+		reminder.CreatedAt = time.Now()
+	}
+	reminder.CreatedAt = reminder.CreatedAt.UTC()
+	reminder.DueAt = reminder.DueAt.UTC()
+	if reminder.Status == "" {
+		reminder.Status = ReminderPending
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO reminders(id, chat_id, requester_id, due_at, text, status, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET due_at = excluded.due_at, text = excluded.text, status = excluded.status`,
+		reminder.ID, reminder.ChatID, reminder.RequesterID, reminder.DueAt.Format(time.RFC3339Nano),
+		reminder.Text, string(reminder.Status), reminder.CreatedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) DueReminders(ctx context.Context, now time.Time, limit int) ([]Reminder, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, chat_id, requester_id, due_at, text, status, created_at
+		FROM reminders WHERE status = 'pending' AND due_at <= ? ORDER BY due_at ASC LIMIT ?`,
+		now.UTC().Format(time.RFC3339Nano), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanReminders(rows)
+}
+
+func (s *Store) ListReminders(ctx context.Context, chatID string, status ReminderStatus) ([]Reminder, error) {
+	query := `SELECT id, chat_id, requester_id, due_at, text, status, created_at FROM reminders WHERE chat_id = ?`
+	args := []any{chatID}
+	if status != "" {
+		query += ` AND status = ?`
+		args = append(args, string(status))
+	}
+	query += ` ORDER BY due_at ASC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanReminders(rows)
+}
+
+func (s *Store) CancelReminder(ctx context.Context, chatID, reminderID string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE reminders SET status = 'cancelled' WHERE id = ? AND chat_id = ? AND status = 'pending'`, reminderID, chatID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("reminder not found")
+	}
+	return nil
+}
+
+func (s *Store) MarkReminderDelivered(ctx context.Context, reminderID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE reminders SET status = 'delivered' WHERE id = ?`, reminderID)
+	return err
+}
+
+func escapeSQLString(value string) string {
+	return strings.ReplaceAll(value, "'", "''")
 }
 
 func nullable(value string) any {
@@ -447,6 +961,150 @@ func nullable(value string) any {
 	return value
 }
 
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
 func NewTopicID(chatID string, now time.Time) string {
 	return fmt.Sprintf("%s:%d", chatID, now.UTC().UnixNano())
+}
+
+func NewListID(chatID string, now time.Time) string {
+	return fmt.Sprintf("list:%s:%d", chatID, now.UTC().UnixNano())
+}
+
+func NewListItemID(listID string, now time.Time) string {
+	return fmt.Sprintf("item:%s:%d", listID, now.UTC().UnixNano())
+}
+
+func NewReminderID(chatID string, now time.Time) string {
+	return fmt.Sprintf("reminder:%s:%d", chatID, now.UTC().UnixNano())
+}
+
+func scanMessages(rows *sql.Rows) ([]Message, error) {
+	var messages []Message
+	for rows.Next() {
+		var message Message
+		var isGroup, isFromSelf int
+		var replyToID, topicID sql.NullString
+		var sentAt string
+		if err := rows.Scan(&message.ID, &message.ChatID, &message.SenderID, &message.Sender, &message.Text,
+			&isGroup, &isFromSelf, &replyToID, &topicID, &sentAt); err != nil {
+			return nil, err
+		}
+		message.IsGroup = isGroup != 0
+		message.IsFromSelf = isFromSelf != 0
+		if replyToID.Valid {
+			message.ReplyToID = replyToID.String
+		}
+		if topicID.Valid {
+			message.TopicID = topicID.String
+		}
+		var err error
+		message.SentAt, err = time.Parse(time.RFC3339Nano, sentAt)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, rows.Err()
+}
+
+func scanTopicRow(rows *sql.Rows) (Topic, float64, error) {
+	var topic Topic
+	var decisionsJSON, openQuestionsJSON, participantsJSON, updatedAt string
+	var distance float64
+	if err := rows.Scan(&topic.ID, &topic.ChatID, &topic.Title, &topic.Summary, &decisionsJSON, &openQuestionsJSON,
+		&participantsJSON, &updatedAt, &distance); err != nil {
+		return Topic{}, 0, err
+	}
+	if err := json.Unmarshal([]byte(decisionsJSON), &topic.Decisions); err != nil {
+		return Topic{}, 0, err
+	}
+	if err := json.Unmarshal([]byte(openQuestionsJSON), &topic.OpenQuestions); err != nil {
+		return Topic{}, 0, err
+	}
+	if err := json.Unmarshal([]byte(participantsJSON), &topic.ActiveParticipants); err != nil {
+		return Topic{}, 0, err
+	}
+	var err error
+	topic.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return Topic{}, 0, err
+	}
+	return topic, distance, nil
+}
+
+func scanTopicRowNoDistance(rows *sql.Rows) (Topic, float64, error) {
+	var topic Topic
+	var decisionsJSON, openQuestionsJSON, participantsJSON, updatedAt string
+	if err := rows.Scan(&topic.ID, &topic.ChatID, &topic.Title, &topic.Summary, &decisionsJSON, &openQuestionsJSON,
+		&participantsJSON, &updatedAt); err != nil {
+		return Topic{}, 0, err
+	}
+	if err := json.Unmarshal([]byte(decisionsJSON), &topic.Decisions); err != nil {
+		return Topic{}, 0, err
+	}
+	if err := json.Unmarshal([]byte(openQuestionsJSON), &topic.OpenQuestions); err != nil {
+		return Topic{}, 0, err
+	}
+	if err := json.Unmarshal([]byte(participantsJSON), &topic.ActiveParticipants); err != nil {
+		return Topic{}, 0, err
+	}
+	var err error
+	topic.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return Topic{}, 0, err
+	}
+	return topic, 0, nil
+}
+
+func scanTopic(row *sql.Row) (Topic, error) {
+	var topic Topic
+	var decisionsJSON, openQuestionsJSON, participantsJSON, updatedAt string
+	if err := row.Scan(&topic.ID, &topic.ChatID, &topic.Title, &topic.Summary, &decisionsJSON, &openQuestionsJSON,
+		&participantsJSON, &updatedAt); err != nil {
+		return Topic{}, err
+	}
+	if err := json.Unmarshal([]byte(decisionsJSON), &topic.Decisions); err != nil {
+		return Topic{}, err
+	}
+	if err := json.Unmarshal([]byte(openQuestionsJSON), &topic.OpenQuestions); err != nil {
+		return Topic{}, err
+	}
+	if err := json.Unmarshal([]byte(participantsJSON), &topic.ActiveParticipants); err != nil {
+		return Topic{}, err
+	}
+	var err error
+	topic.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return Topic{}, err
+	}
+	return topic, nil
+}
+
+func scanReminders(rows *sql.Rows) ([]Reminder, error) {
+	var reminders []Reminder
+	for rows.Next() {
+		var reminder Reminder
+		var status, dueAt, createdAt string
+		if err := rows.Scan(&reminder.ID, &reminder.ChatID, &reminder.RequesterID, &dueAt, &reminder.Text, &status, &createdAt); err != nil {
+			return nil, err
+		}
+		reminder.Status = ReminderStatus(status)
+		var err error
+		reminder.DueAt, err = time.Parse(time.RFC3339Nano, dueAt)
+		if err != nil {
+			return nil, err
+		}
+		reminder.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		reminders = append(reminders, reminder)
+	}
+	return reminders, rows.Err()
 }

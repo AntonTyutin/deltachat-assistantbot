@@ -4,13 +4,11 @@ import "github.com/AntonTyutin/assistantbot-core/llm/prompts"
 
 // LLM task identifiers for metrics, model overrides, and API calls.
 const (
-	TaskGenerateChatReply = prompts.TaskGenerateChatReply
-	TaskUpdateProfile     = prompts.TaskUpdateProfile
-	TaskRebuildProfile    = prompts.TaskRebuildProfile
-	TaskUpdateTopic       = prompts.TaskUpdateTopic
-	TaskRebuildTopic      = prompts.TaskRebuildTopic
-	TaskDailySummary      = prompts.TaskDailySummary
-	TaskChatWithTools     = "chat_with_tools"
+	TaskGenerateChatReply    = prompts.TaskGenerateChatReply
+	TaskUpdateProfile        = prompts.TaskUpdateProfile
+	TaskUpdateTopic          = prompts.TaskUpdateTopic
+	TaskClassifyMessageTopic = prompts.TaskClassifyMessageTopic
+	TaskChatWithTools        = "chat_with_tools"
 )
 
 // AllTaskIDs returns every task id used for LLM calls.

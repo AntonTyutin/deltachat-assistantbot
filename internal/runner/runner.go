@@ -37,10 +37,13 @@ func NewFromConfig(ctx context.Context, cfg config.Config, logger *slog.Logger) 
 		logger.Warn("mcp configuration", "detail", w)
 	}
 	if config.AppDebug() {
-		logger.Warn("APP_DEBUG enabled", "detail", "LLM request and response bodies are logged at debug level and may contain sensitive data")
+		logger.Warn("APP_DEBUG enabled", "detail", "LLM and tool call payloads are logged at debug level and may contain sensitive data")
 	}
 
-	store, err := storage.Open(ctx, cfg.DBPath, cfg.DBEncryptionKey)
+	store, err := storage.Open(ctx, cfg.DBPath, cfg.DBEncryptionKey, storage.Options{
+		RecentMessagesLimit: cfg.RecentMessagesLimit,
+		EmbeddingDimensions: cfg.EmbeddingDimensions,
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("open storage: %w", err)
 	}
@@ -85,6 +88,7 @@ func NewFromConfig(ctx context.Context, cfg config.Config, logger *slog.Logger) 
 		llm.WithRecorder(recorder),
 		llm.WithRetryBackoffMultiplier(cfg.LLMRetryBackoffMultiplier),
 	)
+	embedder := llm.NewOpenAICompatibleEmbedder(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.EmbeddingModel, cfg.EmbeddingDimensions, cfg.HTTPTimeout)
 
 	var mcpReg *mcpclient.Registry
 	if len(cfg.MCPServers) > 0 {
@@ -92,7 +96,7 @@ func NewFromConfig(ctx context.Context, cfg config.Config, logger *slog.Logger) 
 		httpClient := &http.Client{Timeout: cfg.HTTPTimeout}
 		connectCtx, cancel := context.WithTimeout(ctx, cfg.HTTPTimeout)
 		var connectWarnings []string
-		mcpReg, connectWarnings = mcpclient.Connect(connectCtx, cfg.MCPServers, httpClient, recorder)
+		mcpReg, connectWarnings = mcpclient.Connect(connectCtx, cfg.MCPServers, httpClient, recorder, logger)
 		cancel()
 		for _, w := range connectWarnings {
 			logger.Warn("mcp connection", "detail", w)
@@ -106,25 +110,22 @@ func NewFromConfig(ctx context.Context, cfg config.Config, logger *slog.Logger) 
 		}
 	}
 
-	memoryPipeline := memory.NewPipeline(store, llmClient, mcpReg, promptReg)
-	replyService := reply.NewService(store, llmClient, promptReg, cfg.BotNames, mcpReg, logger, recorder)
-	bot := app.New(deltachatClient, store, memoryPipeline, replyService, logger, recorder)
+	memoryPipeline := memory.NewPipeline(store, llmClient, embedder, mcpReg, promptReg, memory.Config{
+		TopicKNNMessages: cfg.TopicKNNMessages,
+		TopicKNNTopics:   cfg.TopicKNNTopics,
+		ListKNNLists:     cfg.ListKNNLists,
+		Recorder:         recorder,
+		Logger:           logger,
+	})
+	replyService := reply.NewService(memoryPipeline, llmClient, promptReg, cfg.BotNames, mcpReg, logger, recorder, cfg.RecentMessagesLimit)
+	bot := app.New(deltachatClient, memoryPipeline, replyService, logger, recorder)
 
 	go func() {
-		err := scheduler.RunDaily(ctx, cfg.DailySummaryTime, logger, func(ctx context.Context, date time.Time) error {
-			chats, err := store.ListChats(ctx)
-			if err != nil {
-				return err
-			}
-			for _, chat := range chats {
-				if err := bot.UpdateDailySummary(ctx, chat.ID, date); err != nil {
-					logger.Error("chat daily summary failed", "chat_id", chat.ID, "error", err)
-				}
-			}
-			return nil
+		err := scheduler.RunReminders(ctx, cfg.ReminderPollInterval, logger, func(ctx context.Context, now time.Time) error {
+			return bot.DeliverDueReminders(ctx, now)
 		})
 		if err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("scheduler stopped", "error", err)
+			logger.Error("reminder scheduler stopped", "error", err)
 		}
 	}()
 

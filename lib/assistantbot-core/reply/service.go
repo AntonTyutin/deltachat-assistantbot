@@ -14,6 +14,7 @@ import (
 	"github.com/AntonTyutin/assistantbot-core/llm"
 	"github.com/AntonTyutin/assistantbot-core/llm/prompts"
 	"github.com/AntonTyutin/assistantbot-core/mcpclient"
+	"github.com/AntonTyutin/assistantbot-core/memory"
 	"github.com/AntonTyutin/assistantbot-core/metrics"
 	"github.com/AntonTyutin/assistantbot-core/storage"
 	"github.com/AntonTyutin/assistantbot-core/transport"
@@ -21,38 +22,50 @@ import (
 
 const failureReply = "😵"
 
-type Service struct {
-	store      *storage.Store
-	llm        llm.Client
-	prompts    *prompts.Registry
-	classifier *Classifier
-	mcp        *mcpclient.Registry
-	logger     *slog.Logger
-	recorder   metrics.Recorder
+type MemoryReader interface {
+	RecentMessages(ctx context.Context, chatID string, limit int) ([]storage.Message, error)
+	GetProfile(ctx context.Context, participantID string) (storage.ParticipantProfile, bool, error)
+	ListsContext(ctx context.Context, chatID string, message transport.Message) (map[string]any, error)
+	ToolRegistry() *memory.ToolRegistry
 }
 
-func NewService(store *storage.Store, llmClient llm.Client, promptReg *prompts.Registry, botNames []string, mcp *mcpclient.Registry, logger *slog.Logger, recorder metrics.Recorder) *Service {
+type Service struct {
+	memory      MemoryReader
+	llm         llm.Client
+	prompts     *prompts.Registry
+	classifier  *Classifier
+	mcp         *mcpclient.Registry
+	logger      *slog.Logger
+	recorder    metrics.Recorder
+	recentLimit int
+}
+
+func NewService(memoryReader MemoryReader, llmClient llm.Client, promptReg *prompts.Registry, botNames []string, mcp *mcpclient.Registry, logger *slog.Logger, recorder metrics.Recorder, recentLimit int) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if recorder == nil {
 		recorder = metrics.Noop
 	}
+	if recentLimit <= 0 {
+		recentLimit = 20
+	}
 	return &Service{
-		store:      store,
-		llm:        llmClient,
-		prompts:    promptReg,
-		classifier: NewClassifier(botNames),
-		mcp:        mcp,
-		logger:     logger,
-		recorder:   recorder,
+		memory:      memoryReader,
+		llm:         llmClient,
+		prompts:     promptReg,
+		classifier:  NewClassifier(botNames),
+		mcp:         mcp,
+		logger:      logger,
+		recorder:    recorder,
+		recentLimit: recentLimit,
 	}
 }
 
 func (s *Service) Decide(ctx context.Context, message transport.Message, topic storage.Topic) (*transport.OutboundMessage, Classification, error) {
 	repliedToBot := false
 	if message.ReplyToID != "" {
-		recent, err := s.store.RecentMessages(ctx, message.ChatID, 20)
+		recent, err := s.memory.RecentMessages(ctx, message.ChatID, s.recentLimit)
 		if err != nil {
 			return nil, Classification{}, err
 		}
@@ -106,19 +119,24 @@ func outboundMessage(message transport.Message, text, replyToID string) *transpo
 
 func (s *Service) generate(ctx context.Context, message transport.Message, topic storage.Topic, classification Classification) (string, error) {
 	path := metrics.ReplyPathJSON
-	if s.mcp != nil {
-		path = s.replyToolPath()
+	tools := s.toolRuntime(message)
+	if tools.HasToolsForTask(llm.TaskGenerateChatReply) {
+		path = s.replyToolPath(tools)
 	}
 	start := time.Now()
 	defer func() {
 		s.recorder.RecordReplyGenerate(path, time.Since(start))
 	}()
 
-	recent, err := s.store.RecentMessages(ctx, message.ChatID, 20)
+	recent, err := s.memory.RecentMessages(ctx, message.ChatID, s.recentLimit)
 	if err != nil {
 		return "", err
 	}
-	profile, _, err := s.store.GetProfile(ctx, message.SenderID)
+	profile, _, err := s.memory.GetProfile(ctx, message.SenderID)
+	if err != nil {
+		return "", err
+	}
+	listsContext, err := s.memory.ListsContext(ctx, message.ChatID, message)
 	if err != nil {
 		return "", err
 	}
@@ -128,10 +146,13 @@ func (s *Service) generate(ctx context.Context, message transport.Message, topic
 		"profile": profile,
 		"topic":   topic,
 		"recent":  recent,
+		"memory":  listsContext,
 	}
 
-	if s.mcp != nil && s.mcp.HasToolsForTask(llm.TaskGenerateChatReply) {
-		text, err := s.generateWithMCP(ctx, payload)
+	if tools.HasToolsForTask(llm.TaskGenerateChatReply) {
+		tracker := newReplyToolTracker(s.recorder)
+		defer tracker.flush()
+		text, err := s.generateWithTools(ctx, payload, tools, tracker.wrap(tools.ExecuteTool))
 		if err != nil {
 			if classification.Intent == IntentSummary {
 				return fallbackSummary(topic), nil
@@ -157,29 +178,39 @@ func (s *Service) generate(ctx context.Context, message transport.Message, topic
 	return strings.TrimSpace(response.Reply), nil
 }
 
-func (s *Service) generateWithMCP(ctx context.Context, payload map[string]any) (string, error) {
+func (s *Service) toolRuntime(message transport.Message) *memory.CompositeToolRuntime {
+	var memoryTools *memory.ToolRegistry
+	if s.memory != nil {
+		memoryTools = s.memory.ToolRegistry()
+	}
+	return memory.NewCompositeToolRuntime(s.mcp, memoryTools, message.ChatID, message.SenderID)
+}
+
+func (s *Service) generateWithTools(ctx context.Context, payload map[string]any, tools *memory.CompositeToolRuntime, exec llm.ToolExecutorFunc) (string, error) {
 	inputJSON, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
 	messages := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: s.prompts.SystemPromptForMCP(s.mcp.SystemPromptAppendForTask(llm.TaskGenerateChatReply))},
+		{Role: openai.ChatMessageRoleSystem, Content: s.prompts.SystemPromptForMCP(tools.SystemPromptAppendForTask(llm.TaskGenerateChatReply))},
 		{Role: openai.ChatMessageRoleUser, Content: string(inputJSON)},
 	}
-	return s.llm.ChatWithTools(ctx, llm.TaskGenerateChatReply, messages, s.mcp.ToolsForTask(llm.TaskGenerateChatReply), s.mcp.ExecuteTool)
+	return s.llm.ChatWithTools(ctx, llm.TaskGenerateChatReply, messages, tools.ToolsForTask(llm.TaskGenerateChatReply), exec)
 }
 
-func (s *Service) replyToolPath() string {
-	if s.mcp == nil {
-		return metrics.ReplyPathJSON
-	}
-	tools := s.mcp.ToolsForTask(llm.TaskGenerateChatReply)
-	if len(tools) == 0 {
+func (s *Service) replyToolPath(tools *memory.CompositeToolRuntime) string {
+	defs := tools.ToolsForTask(llm.TaskGenerateChatReply)
+	if len(defs) == 0 {
 		return metrics.ReplyPathJSON
 	}
 	hasMCP := false
 	hasOpenRouter := false
-	for _, t := range tools {
+	hasMemory := false
+	for _, t := range defs {
+		if t.Function != nil && strings.HasPrefix(t.Function.Name, "memory_") {
+			hasMemory = true
+			continue
+		}
 		if llm.IsOpenRouterToolType(t.Type) {
 			hasOpenRouter = true
 		} else {
@@ -191,8 +222,12 @@ func (s *Service) replyToolPath() string {
 		return metrics.ReplyPathMixedTools
 	case hasOpenRouter:
 		return metrics.ReplyPathOpenRouterTools
-	default:
+	case hasMCP:
 		return metrics.ReplyPathMCPTools
+	case hasMemory:
+		return metrics.ReplyPathMCPTools
+	default:
+		return metrics.ReplyPathJSON
 	}
 }
 

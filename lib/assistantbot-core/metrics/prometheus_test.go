@@ -3,6 +3,7 @@ package metrics
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -10,7 +11,9 @@ import (
 
 func TestNewPrometheusServiceStarted(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	_ = NewPrometheus(reg, "bot@example.com", "2026.3.1")
+	p := NewPrometheus(reg, "bot@example.com", "2026.3.1")
+	p.RecordReplyToolCall(ToolSourceMemory, "memory_add_note", "success", 25*time.Millisecond)
+	p.RecordInboundMessageToolCallCount(ToolSourceMemory, 2)
 
 	mfs, err := reg.Gather()
 	if err != nil {

@@ -18,7 +18,7 @@ Do not use host `go` for normal development unless you are explicitly debugging 
 
 The production container bundles both the Assistant Bot binary and `deltachat-rpc-server`. Keep transport-agnostic bot logic in `lib/assistantbot-core` (import path `github.com/AntonTyutin/assistantbot-core`). DeltaChat integration stays under `internal/deltachat`; wiring and env config stay in this repository (`internal/runner`, `internal/config`, `cmd/bot`).
 
-Per-chat memory uses two FIFO queues per `chat_id`: `prepare` (`PrepareForReply` via `RunChatMemory`) and `background` (`ProcessMessageUpdate`, outbound storage, daily summary). Background work does not block the next message's prepare/reply path. `Decide` / `SendText` are outside both queues. SQLite uses `MaxOpenConns(1)`.
+Per-chat memory uses two FIFO queues per `chat_id`: `prepare` (`PrepareForReply` via `RunChatMemory`) and `background` (`ProcessMessageUpdate`, outbound storage, reminder delivery). Background work does not block the next message's prepare/reply path. `Decide` / `SendText` are outside both queues. SQLite uses `MaxOpenConns(1)`.
 
 ## Commits
 
