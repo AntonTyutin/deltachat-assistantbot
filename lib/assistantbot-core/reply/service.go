@@ -93,6 +93,11 @@ func (s *Service) Decide(ctx context.Context, message transport.Message, topic s
 	}
 	reply = sanitizeDirectAddress(reply, message)
 	if strings.TrimSpace(reply) == "" {
+		s.logger.WarnContext(ctx, "reply skipped: empty",
+			"chat_id", message.ChatID,
+			"message_id", message.ID,
+			"intent", classification.Intent,
+		)
 		return nil, classification, nil
 	}
 	return outboundMessage(message, reply, replyToID(message)), classification, nil
@@ -159,7 +164,17 @@ func (s *Service) generate(ctx context.Context, message transport.Message, topic
 			}
 			return "", err
 		}
-		return strings.TrimSpace(extractReplyFromModel(text)), nil
+		reply, err := parseModelReply(text)
+		if err != nil {
+			s.logger.WarnContext(ctx, "model reply parse failed",
+				"chat_id", message.ChatID,
+				"message_id", message.ID,
+				"preview", previewForLog(text),
+				"error", err,
+			)
+			return "", err
+		}
+		return reply, nil
 	}
 
 	raw, err := s.llm.CompleteJSON(ctx, llm.TaskGenerateChatReply, payload, `{"reply":"short chat message in the language of the conversation"}`)
@@ -229,18 +244,6 @@ func (s *Service) replyToolPath(tools *memory.CompositeToolRuntime) string {
 	default:
 		return metrics.ReplyPathJSON
 	}
-}
-
-func extractReplyFromModel(text string) string {
-	text = strings.TrimSpace(text)
-	text = stripJSONFence(text)
-	var response struct {
-		Reply string `json:"reply"`
-	}
-	if err := json.Unmarshal([]byte(text), &response); err == nil && strings.TrimSpace(response.Reply) != "" {
-		return strings.TrimSpace(response.Reply)
-	}
-	return text
 }
 
 func stripJSONFence(s string) string {

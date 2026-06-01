@@ -134,4 +134,4 @@ Task-specific variables (same fallback-list format):
 - `LLM_MODEL_TOPIC` — topic updates and classification
 - `LLM_MODEL_PROFILE` — participant profile updates
 
-Token limits: `LLM_MAX_COMPLETION_TOKENS` (fallback) and per-task `LLM_MAX_COMPLETION_TOKENS_REPLY`, `LLM_MAX_COMPLETION_TOKENS_TOPIC`, `LLM_MAX_COMPLETION_TOKENS_PROFILE` (see `.env.example`).
+Token limits: `LLM_MAX_COMPLETION_TOKENS` (fallback, default 2048) and optional per-task overrides `LLM_MAX_COMPLETION_TOKENS_REPLY`, `LLM_MAX_COMPLETION_TOKENS_TOPIC`, `LLM_MAX_COMPLETION_TOKENS_PROFILE` (see `.env.example`). Reply generation with memory/MCP tools should use the global fallback or at least ~1024 tokens; very low reply limits truncate JSON replies.
