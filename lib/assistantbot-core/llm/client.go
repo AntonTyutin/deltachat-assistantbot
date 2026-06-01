@@ -142,8 +142,11 @@ func (c *OpenRouterClient) createChatCompletionWithTools(ctx context.Context, bo
 	return out, nil
 }
 
+const emptyReplyNudge = `Your last message had no text. Reply with JSON only: {"reply":"your short message"}`
+
 func (c *OpenRouterClient) chatWithToolsForModel(ctx context.Context, task, model string, maxTokens int, base []openai.ChatCompletionMessage, tools []ToolDefinition, exec ToolExecutorFunc) (string, error) {
 	msgs := append([]openai.ChatCompletionMessage{}, base...)
+	nudgedForEmptyReply := false
 
 	for step := 0; step < maxToolOrChatSteps; step++ {
 		if step == 0 {
@@ -173,8 +176,21 @@ func (c *OpenRouterClient) chatWithToolsForModel(ctx context.Context, task, mode
 
 		choice := resp.Choices[0].Message
 		if len(choice.ToolCalls) == 0 {
+			content := strings.TrimSpace(choice.Content)
+			if content == "" {
+				c.mrec().RecordChatCompletion(task, model, metrics.MethodChatCompletion, dur, nil, "empty_content", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
+				if step > 0 && !nudgedForEmptyReply {
+					nudgedForEmptyReply = true
+					msgs = append(msgs, openai.ChatCompletionMessage{
+						Role:    openai.ChatMessageRoleUser,
+						Content: emptyReplyNudge,
+					})
+					continue
+				}
+				return "", ErrEmptyMessageContent
+			}
 			c.mrec().RecordChatCompletion(task, model, metrics.MethodChatCompletion, dur, nil, "success", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
-			return strings.TrimSpace(choice.Content), nil
+			return content, nil
 		}
 
 		c.mrec().RecordChatCompletion(task, model, metrics.MethodChatCompletion, dur, nil, "success", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
