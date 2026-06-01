@@ -14,6 +14,7 @@ const namespace = "dc_assistantbot"
 
 var llmBuckets = []float64{.05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120}
 var toolCallCountBuckets = []float64{0, 1, 2, 3, 5, 8, 13, 21}
+var promptPartBytesBuckets = []float64{128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072}
 
 // Prometheus implements Recorder using Prometheus collectors.
 type Prometheus struct {
@@ -34,6 +35,7 @@ type Prometheus struct {
 	replyToolCalls              *prometheus.CounterVec
 	replyToolCallDuration       *prometheus.HistogramVec
 	inboundMessageToolCallCount *prometheus.HistogramVec
+	promptPartBytes             *prometheus.HistogramVec
 	serviceStarted              *prometheus.CounterVec
 }
 
@@ -184,6 +186,15 @@ func NewPrometheus(reg prometheus.Registerer, botID, version string) *Prometheus
 			},
 			[]string{"bot_id", "source"},
 		),
+		promptPartBytes: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: namespace,
+				Name:      "llm_prompt_part_bytes",
+				Help:      "UTF-8 byte size of an initial LLM prompt component per task (system, tools, tools_definitions, user).",
+				Buckets:   promptPartBytesBuckets,
+			},
+			[]string{"bot_id", "task", "part"},
+		),
 		serviceStarted: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: namespace,
@@ -211,6 +222,7 @@ func NewPrometheus(reg prometheus.Registerer, botID, version string) *Prometheus
 		p.replyToolCalls,
 		p.replyToolCallDuration,
 		p.inboundMessageToolCallCount,
+		p.promptPartBytes,
 		p.serviceStarted,
 	)
 	version = strings.TrimSpace(version)
@@ -285,6 +297,14 @@ func (p *Prometheus) RecordReplyToolCall(source, tool, outcome string, dur time.
 
 func (p *Prometheus) RecordInboundMessageToolCallCount(source string, count int) {
 	p.inboundMessageToolCallCount.WithLabelValues(p.botID, source).Observe(float64(count))
+}
+
+// RecordPromptPartBytes implements Recorder.
+func (p *Prometheus) RecordPromptPartBytes(task, part string, bytes int) {
+	if bytes <= 0 {
+		return
+	}
+	p.promptPartBytes.WithLabelValues(p.botID, task, part).Observe(float64(bytes))
 }
 
 func classifyAPIOutcome(err error) string {

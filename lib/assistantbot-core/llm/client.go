@@ -146,6 +146,9 @@ func (c *OpenRouterClient) chatWithToolsForModel(ctx context.Context, task, mode
 	msgs := append([]openai.ChatCompletionMessage{}, base...)
 
 	for step := 0; step < maxToolOrChatSteps; step++ {
+		if step == 0 {
+			c.recordPromptParts(ctx, task)
+		}
 		body := chatCompletionRequestBody{
 			Model:               model,
 			Messages:            msgs,
@@ -218,16 +221,20 @@ func (c *OpenRouterClient) completeJSONWithModel(ctx context.Context, model, tas
 	if c.prompts == nil {
 		return nil, fmt.Errorf("llm prompts not configured")
 	}
+	systemPrompt := c.prompts.SystemPrompt(task)
+	userPrompt := CompleteJSONUserPrompt(task, schema, inputJSON)
+	PromptPartsForCompleteJSON(systemPrompt, userPrompt).Record(c.mrec(), task)
+
 	req := openai.ChatCompletionRequest{
 		Model: model,
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleSystem,
-				Content: c.prompts.SystemPrompt(task),
+				Content: systemPrompt,
 			},
 			{
 				Role:    openai.ChatMessageRoleUser,
-				Content: fmt.Sprintf("Task: %s\nSchema: %s\nInput: %s", task, schema, inputJSON),
+				Content: userPrompt,
 			},
 		},
 		Temperature:         0.2,
@@ -289,6 +296,12 @@ func cloneTaskCompletionTokens(taskCompletionTokens map[string]int) map[string]i
 		cloned[task] = tokens
 	}
 	return cloned
+}
+
+func (c *OpenRouterClient) recordPromptParts(ctx context.Context, task string) {
+	if parts, ok := PromptPartsFromContext(ctx); ok {
+		parts.Record(c.mrec(), task)
+	}
 }
 
 func (c *OpenRouterClient) maxCompletionTokensForTask(task string) int {

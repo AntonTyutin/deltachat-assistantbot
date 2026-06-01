@@ -39,6 +39,8 @@ func (r *recordingToolMetrics) RecordReplyToolCall(source, tool, outcome string,
 	r.calls = append(r.calls, toolCallRecord{source: source, tool: tool, outcome: outcome})
 }
 
+func (r *recordingToolMetrics) RecordPromptPartBytes(string, string, int) {}
+
 func (r *recordingToolMetrics) RecordInboundMessageToolCallCount(source string, count int) {
 	r.counts = append(r.counts, sourceCountRecord{source: source, count: count})
 }

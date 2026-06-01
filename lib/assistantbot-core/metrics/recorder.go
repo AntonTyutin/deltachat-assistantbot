@@ -63,6 +63,10 @@ type Recorder interface {
 	RecordReplyToolCall(source, tool, outcome string, dur time.Duration)
 	// RecordInboundMessageToolCallCount records how many reply-path tool calls of source ran for one inbound message.
 	RecordInboundMessageToolCallCount(source string, count int)
+
+	// RecordPromptPartBytes records UTF-8 byte size of one initial prompt component for an LLM call.
+	// part is PromptPartSystem, PromptPartTools, PromptPartToolsDefinitions, or PromptPartUser.
+	RecordPromptPartBytes(task, part string, bytes int)
 }
 
 // Noop is a Recorder that discards all events.
@@ -83,3 +87,4 @@ func (noopRecorder) RecordChatMemoryTaskDuration(string, time.Duration)     {}
 func (noopRecorder) RecordReplyToolCall(string, string, string, time.Duration) {
 }
 func (noopRecorder) RecordInboundMessageToolCallCount(string, int) {}
+func (noopRecorder) RecordPromptPartBytes(string, string, int)     {}

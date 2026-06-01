@@ -40,6 +40,7 @@ func NewPipeline(store *storage.Store, llmClient llm.Client, embedder llm.Embedd
 }
 
 type promptRegistry interface {
+	SystemPrompt(task string) string
 	SystemPromptForMCP(mcpAppend string) string
 }
 

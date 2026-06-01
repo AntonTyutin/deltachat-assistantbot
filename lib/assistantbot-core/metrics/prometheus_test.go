@@ -14,6 +14,8 @@ func TestNewPrometheusServiceStarted(t *testing.T) {
 	p := NewPrometheus(reg, "bot@example.com", "2026.3.1")
 	p.RecordReplyToolCall(ToolSourceMemory, "memory_add_note", "success", 25*time.Millisecond)
 	p.RecordInboundMessageToolCallCount(ToolSourceMemory, 2)
+	p.RecordPromptPartBytes("generate_chat_reply", PromptPartSystem, 512)
+	p.RecordPromptPartBytes("generate_chat_reply", PromptPartToolsDefinitions, 2048)
 
 	mfs, err := reg.Gather()
 	if err != nil {
@@ -47,6 +49,17 @@ func TestNewPrometheusServiceStarted(t *testing.T) {
 			names = append(names, mf.GetName())
 		}
 		t.Fatalf("service_started not found; metrics: %s", strings.Join(names, ", "))
+	}
+
+	var promptPartsFound int
+	for _, mf := range mfs {
+		if mf.GetName() != namespace+"_llm_prompt_part_bytes" {
+			continue
+		}
+		promptPartsFound += len(mf.GetMetric())
+	}
+	if promptPartsFound < 2 {
+		t.Fatalf("llm_prompt_part_bytes samples = %d, want at least 2", promptPartsFound)
 	}
 }
 

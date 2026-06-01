@@ -206,11 +206,17 @@ func (s *Service) generateWithTools(ctx context.Context, payload map[string]any,
 	if err != nil {
 		return "", err
 	}
+	task := llm.TaskGenerateChatReply
+	toolDefs := tools.ToolsForTask(task)
+	mcpAppend, memoryAppend := tools.SystemPromptAppendsForTask(task)
+	user := string(inputJSON)
+	parts := llm.NewPromptParts(s.prompts.SystemPrompt(task), mcpAppend, memoryAppend, user, toolDefs)
+	ctx = llm.ContextWithPromptParts(ctx, parts)
 	messages := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: s.prompts.SystemPromptForMCP(tools.SystemPromptAppendForTask(llm.TaskGenerateChatReply))},
-		{Role: openai.ChatMessageRoleUser, Content: string(inputJSON)},
+		{Role: openai.ChatMessageRoleSystem, Content: s.prompts.SystemPromptForMCP(tools.SystemPromptAppendForTask(task))},
+		{Role: openai.ChatMessageRoleUser, Content: user},
 	}
-	return s.llm.ChatWithTools(ctx, llm.TaskGenerateChatReply, messages, tools.ToolsForTask(llm.TaskGenerateChatReply), exec)
+	return s.llm.ChatWithTools(ctx, task, messages, toolDefs, exec)
 }
 
 func (s *Service) replyToolPath(tools *memory.CompositeToolRuntime) string {

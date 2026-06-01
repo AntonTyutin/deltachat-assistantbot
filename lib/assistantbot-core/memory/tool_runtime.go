@@ -34,17 +34,25 @@ func (c *CompositeToolRuntime) HasToolsForTask(task string) bool {
 	return len(c.ToolsForTask(task)) > 0
 }
 
-func (c *CompositeToolRuntime) SystemPromptAppendForTask(task string) string {
-	var parts []string
+// SystemPromptAppendsForTask returns MCP and memory system prompt append text separately.
+func (c *CompositeToolRuntime) SystemPromptAppendsForTask(task string) (mcpAppend, memoryAppend string) {
 	if c.mcp != nil {
-		if text := strings.TrimSpace(c.mcp.SystemPromptAppendForTask(task)); text != "" {
-			parts = append(parts, text)
-		}
+		mcpAppend = strings.TrimSpace(c.mcp.SystemPromptAppendForTask(task))
 	}
 	if c.memory != nil {
-		if text := strings.TrimSpace(c.memory.SystemPromptAppendForTask(task)); text != "" {
-			parts = append(parts, text)
-		}
+		memoryAppend = strings.TrimSpace(c.memory.SystemPromptAppendForTask(task))
+	}
+	return mcpAppend, memoryAppend
+}
+
+func (c *CompositeToolRuntime) SystemPromptAppendForTask(task string) string {
+	mcpAppend, memoryAppend := c.SystemPromptAppendsForTask(task)
+	var parts []string
+	if mcpAppend != "" {
+		parts = append(parts, mcpAppend)
+	}
+	if memoryAppend != "" {
+		parts = append(parts, memoryAppend)
 	}
 	return strings.Join(parts, "\n")
 }
