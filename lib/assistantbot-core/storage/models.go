@@ -3,6 +3,7 @@ package storage
 import (
 	"time"
 
+	"github.com/AntonTyutin/assistantbot-core/reminders"
 	"github.com/AntonTyutin/assistantbot-core/transport"
 )
 
@@ -97,13 +98,16 @@ const (
 )
 
 type Reminder struct {
-	ID          string         `json:"id"`
-	ChatID      string         `json:"chat_id"`
-	RequesterID string         `json:"requester_id"`
-	DueAt       time.Time      `json:"due_at"`
-	Text        string         `json:"text"`
-	Status      ReminderStatus `json:"status"`
-	CreatedAt   time.Time      `json:"created_at"`
+	ID              string                    `json:"id"`
+	ChatID          string                    `json:"chat_id"`
+	RequesterID     string                    `json:"requester_id"`
+	DueAt           time.Time                 `json:"due_at"`
+	Text            string                    `json:"text"`
+	Status          ReminderStatus            `json:"status"`
+	CreatedAt       time.Time                 `json:"created_at"`
+	AnchorAt        time.Time                 `json:"anchor_at,omitempty"`
+	Recurrence      *reminders.RecurrenceRule `json:"recurrence,omitempty"`
+	OccurrenceCount int                       `json:"occurrence_count,omitempty"`
 }
 
 type NearestMessage struct {

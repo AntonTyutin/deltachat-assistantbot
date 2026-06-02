@@ -6,6 +6,7 @@ import (
 
 	"github.com/AntonTyutin/assistantbot-core/llm"
 	"github.com/AntonTyutin/assistantbot-core/metrics"
+	"github.com/AntonTyutin/assistantbot-core/reminders"
 	"github.com/AntonTyutin/assistantbot-core/storage"
 	"github.com/AntonTyutin/assistantbot-core/transport"
 )
@@ -284,16 +285,34 @@ func (p *Pipeline) ToolRegistry() *ToolRegistry {
 }
 
 func (p *Pipeline) DeliverDueReminders(ctx context.Context, now time.Time, send func(ctx context.Context, chatID, text string) error) error {
-	reminders, err := p.store.DueReminders(ctx, now, 100)
+	due, err := p.store.DueReminders(ctx, now, 100)
 	if err != nil {
 		return err
 	}
-	for _, reminder := range reminders {
+	for _, reminder := range due {
 		text := "Reminder: " + reminder.Text
 		if err := send(ctx, reminder.ChatID, text); err != nil {
 			return err
 		}
-		if err := p.store.MarkReminderDelivered(ctx, reminder.ID); err != nil {
+		if reminder.Recurrence == nil {
+			if err := p.store.AdvanceReminder(ctx, reminder.ID, nil, 0); err != nil {
+				return err
+			}
+			continue
+		}
+		count := reminder.OccurrenceCount + 1
+		anchor := reminder.AnchorAt
+		if anchor.IsZero() {
+			anchor = reminder.DueAt
+		}
+		next, ok := reminders.NextDue(anchor, now, *reminder.Recurrence, count)
+		if !ok {
+			if err := p.store.AdvanceReminder(ctx, reminder.ID, nil, count); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := p.store.AdvanceReminder(ctx, reminder.ID, &next, count); err != nil {
 			return err
 		}
 	}
