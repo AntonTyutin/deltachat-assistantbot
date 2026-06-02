@@ -29,7 +29,7 @@ func listItemsToolSchema(itemsDescription string, requireItems bool) map[string]
 			"item_ids": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": "Optional item ids from memory_read_lists",
+				"description": "Optional item ids from memory_read_list",
 			},
 		},
 		"required": []string{"list_title"},

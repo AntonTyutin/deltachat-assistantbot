@@ -20,27 +20,51 @@ func TestListItemBatchOperations(t *testing.T) {
 		"list_title": "Shopping",
 		"items":      []string{"milk", "bread", "eggs"},
 	})
-	if _, err := registry.ExecuteTool(ctx, "chat-1", "user-1", "memory_add_list_items", string(addArgs)); err != nil {
-		t.Fatal(err)
-	}
-
-	readOut, err := registry.ExecuteTool(ctx, "chat-1", "user-1", "memory_read_lists", `{}`)
+	addOut, err := registry.ExecuteTool(ctx, "chat-1", "user-1", "memory_add_list_items", string(addArgs))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var lists []struct {
+	var addResult struct {
+		ListID string `json:"list_id"`
+	}
+	if err := json.Unmarshal([]byte(addOut), &addResult); err != nil {
+		t.Fatal(err)
+	}
+	if addResult.ListID == "" {
+		t.Fatalf("missing list_id in add result: %s", addOut)
+	}
+
+	readList := func() struct {
 		Title string `json:"title"`
 		Items []struct {
 			ID   string `json:"id"`
 			Text string `json:"text"`
 			Done bool   `json:"done"`
 		} `json:"items"`
+	} {
+		t.Helper()
+		readArgs, _ := json.Marshal(map[string]string{"list_id": addResult.ListID})
+		readOut, err := registry.ExecuteTool(ctx, "chat-1", "user-1", "memory_read_list", string(readArgs))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var list struct {
+			Title string `json:"title"`
+			Items []struct {
+				ID   string `json:"id"`
+				Text string `json:"text"`
+				Done bool   `json:"done"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal([]byte(readOut), &list); err != nil {
+			t.Fatal(err)
+		}
+		return list
 	}
-	if err := json.Unmarshal([]byte(readOut), &lists); err != nil {
-		t.Fatal(err)
-	}
-	if len(lists) != 1 || len(lists[0].Items) != 3 {
-		t.Fatalf("unexpected lists: %s", readOut)
+
+	list := readList()
+	if list.Title != "Shopping" || len(list.Items) != 3 {
+		t.Fatalf("unexpected list: title=%q items=%d", list.Title, len(list.Items))
 	}
 
 	completeArgs, _ := json.Marshal(map[string]any{
@@ -63,21 +87,15 @@ func TestListItemBatchOperations(t *testing.T) {
 		t.Fatalf("complete result: %s", completeOut)
 	}
 
-	readOut, err = registry.ExecuteTool(ctx, "chat-1", "user-1", "memory_read_lists", `{}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(readOut), &lists); err != nil {
-		t.Fatal(err)
-	}
+	list = readList()
 	doneCount := 0
-	for _, item := range lists[0].Items {
+	for _, item := range list.Items {
 		if item.Done {
 			doneCount++
 		}
 	}
 	if doneCount != 2 {
-		t.Fatalf("expected 2 done items, got %s", readOut)
+		t.Fatalf("expected 2 done items, got %d", doneCount)
 	}
 
 	uncompleteArgs, _ := json.Marshal(map[string]any{
@@ -107,15 +125,45 @@ func TestListItemBatchOperations(t *testing.T) {
 		t.Fatalf("remove result: %s", removeOut)
 	}
 
-	readOut, err = registry.ExecuteTool(ctx, "chat-1", "user-1", "memory_read_lists", `{}`)
+	list = readList()
+	if len(list.Items) != 2 {
+		t.Fatalf("expected 2 remaining items, got %d", len(list.Items))
+	}
+}
+
+func TestReadListScopedToChat(t *testing.T) {
+	ctx := context.Background()
+	store := storage.OpenTestDB(t, "secret")
+	defer store.Close()
+	registry := NewToolRegistry(store, llm.StaticEmbedder{Vector: []float32{0.1, 0.2, 0.3}}, nil)
+
+	now := time.Now()
+	list := storage.List{
+		ID:        "l1",
+		ChatID:    "chat-a",
+		Kind:      storage.ListKindList,
+		Title:     "Shopping",
+		UpdatedAt: now,
+	}
+	if err := store.UpsertList(ctx, list, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	args, _ := json.Marshal(map[string]string{"list_id": "l1"})
+	_, err := registry.ExecuteTool(ctx, "chat-b", "user-1", "memory_read_list", string(args))
+	if err == nil {
+		t.Fatal("expected read from another chat to fail")
+	}
+
+	out, err := registry.ExecuteTool(ctx, "chat-a", "user-1", "memory_read_list", string(args))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal([]byte(readOut), &lists); err != nil {
-		t.Fatal(err)
+	var got struct {
+		ID string `json:"id"`
 	}
-	if len(lists[0].Items) != 2 {
-		t.Fatalf("expected 2 remaining items, got %s", readOut)
+	if err := json.Unmarshal([]byte(out), &got); err != nil || got.ID != "l1" {
+		t.Fatalf("read list: out=%s err=%v", out, err)
 	}
 }
 

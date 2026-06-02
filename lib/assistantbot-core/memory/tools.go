@@ -37,7 +37,7 @@ func (r *ToolRegistry) ToolsForTask(task string) []llm.ToolDefinition {
 		return nil
 	}
 	return []llm.ToolDefinition{
-		functionTool("memory_add_note", "Create or append a note in the current chat", map[string]any{
+		functionTool("memory_add_note", "Create or append a note in the current chat. Use a specific note title (topic/scope), not a generic label.", map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"title": map[string]any{"type": "string"},
@@ -45,11 +45,11 @@ func (r *ToolRegistry) ToolsForTask(task string) []llm.ToolDefinition {
 			},
 			"required": []string{"title", "text"},
 		}),
-		functionTool("memory_add_list_items", "Add one or more items to a named todo/shopping list in the current chat", listItemsToolSchema(
+		functionTool("memory_add_list_items", "Add one or more items to a named todo/shopping list in the current chat. list_title must be specific (purpose/channel/scope); create a new list only after clarifying ambiguous requests.", listItemsToolSchema(
 			"Item texts to add",
 			true,
 		)),
-		functionTool("memory_remove_list_items", "Remove items from a named list by text and/or item_ids from memory_read_lists", listItemsToolSchema(
+		functionTool("memory_remove_list_items", "Remove items from a named list by text and/or item_ids from memory_read_list", listItemsToolSchema(
 			"Item texts to remove (matches all items with the same text, case-insensitive)",
 			false,
 		)),
@@ -61,9 +61,12 @@ func (r *ToolRegistry) ToolsForTask(task string) []llm.ToolDefinition {
 			"Item texts to mark not done",
 			false,
 		)),
-		functionTool("memory_read_lists", "Read lists and notes for the current chat", map[string]any{
-			"type":       "object",
-			"properties": map[string]any{},
+		functionTool("memory_read_list", "Read one list or note by id from chat context (full items with ids and metadata)", map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"list_id": map[string]any{"type": "string"},
+			},
+			"required": []string{"list_id"},
 		}),
 		functionTool("memory_set_reminder", "Schedule a reminder in the current chat", map[string]any{
 			"type": "object",
@@ -96,9 +99,11 @@ func (r *ToolRegistry) SystemPromptAppendForTask(task string) string {
 		return ""
 	}
 	return strings.TrimSpace(`You have memory tools for notes, lists, and reminders in the current chat.
-When the user mentions something worth remembering, suggest to add it to an appropriate note/list o create a new note/list.
+When the user mentions something worth remembering, suggest adding it to an appropriate note/list or creating a new one.
 If the user agrees, use the appropriate tool to save the item.
-For lists (todo/shopping), use memory_read_lists to see item ids, then batch tools: memory_add_list_items, memory_remove_list_items, memory_complete_list_items, memory_uncomplete_list_items. Match items by text and/or item_ids.
+Relevant lists/notes in chat context include id, title, kind, and items_condensed (one item per line, "[done]" when completed). Call memory_read_list with that id when you need item ids, authors, or timestamps to edit a list.
+For lists (todo/shopping), use memory_read_list before batch tools: memory_add_list_items, memory_remove_list_items, memory_complete_list_items, memory_uncomplete_list_items. Match items by text and/or item_ids.
+When creating a new note or list and no existing one fits, pick a specific title that reflects purpose, channel, or scope (e.g. "Online groceries (general)" vs "Metro — weekend"), not vague labels like "shopping" or "notes". If the user did not give enough detail (offline vs online, store-specific vs general, topic area for notes, etc.), ask one short clarifying question in chat before calling memory_add_list_items or memory_add_note.
 For reminders, parse due_at as RFC3339. If timezone is unknown, ask the user and store timezone in profile when provided.
 Use the chat language to store notes, list items, and reminders.`)
 }
@@ -121,8 +126,8 @@ func (r *ToolRegistry) ExecuteTool(ctx context.Context, chatID, requesterID, too
 		return r.completeListItems(ctx, chatID, argumentsJSON)
 	case "memory_uncomplete_list_items":
 		return r.uncompleteListItems(ctx, chatID, argumentsJSON)
-	case "memory_read_lists":
-		return r.readLists(ctx, chatID)
+	case "memory_read_list":
+		return r.readList(ctx, chatID, argumentsJSON)
 	case "memory_set_reminder":
 		return r.setReminder(ctx, chatID, requesterID, argumentsJSON)
 	case "memory_list_reminders":
@@ -175,23 +180,36 @@ func (r *ToolRegistry) addNote(ctx context.Context, chatID, requesterID, argumen
 	return fmt.Sprintf(`{"status":"saved","list_id":%q,"item_id":%q}`, list.ID, item.ID), nil
 }
 
-func (r *ToolRegistry) readLists(ctx context.Context, chatID string) (string, error) {
-	lists, err := r.store.ListLists(ctx, chatID, "")
+func (r *ToolRegistry) readList(ctx context.Context, chatID, argumentsJSON string) (string, error) {
+	var args struct {
+		ListID string `json:"list_id"`
+	}
+	if err := json.Unmarshal([]byte(argumentsJSON), &args); err != nil {
+		return "", err
+	}
+	listID := strings.TrimSpace(args.ListID)
+	if listID == "" {
+		return "", fmt.Errorf("list_id is required")
+	}
+	list, ok, err := r.store.GetList(ctx, listID)
 	if err != nil {
 		return "", err
 	}
-	out := make([]map[string]any, 0, len(lists))
-	for _, list := range lists {
-		items, err := r.store.ListItems(ctx, list.ID)
-		if err != nil {
-			return "", err
-		}
-		out = append(out, map[string]any{
-			"id":    list.ID,
-			"kind":  list.Kind,
-			"title": list.Title,
-			"items": items,
-		})
+	if !ok {
+		return "", fmt.Errorf("list %q not found", listID)
+	}
+	if list.ChatID != chatID {
+		return "", fmt.Errorf("list %q not found", listID)
+	}
+	items, err := r.store.ListItems(ctx, list.ID)
+	if err != nil {
+		return "", err
+	}
+	out := map[string]any{
+		"id":    list.ID,
+		"kind":  list.Kind,
+		"title": list.Title,
+		"items": items,
 	}
 	raw, err := json.Marshal(out)
 	if err != nil {

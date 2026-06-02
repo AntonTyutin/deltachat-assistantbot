@@ -69,4 +69,10 @@ func TestListsContextUsesKNNLists(t *testing.T) {
 	if listsRaw[0]["title"] != "Shopping" {
 		t.Fatalf("expected shopping list, got %#v", listsRaw[0]["title"])
 	}
+	if _, hasItems := listsRaw[0]["items"]; hasItems {
+		t.Fatal("context lists must not include full items")
+	}
+	if listsRaw[0]["items_condensed"] != "milk" {
+		t.Fatalf("expected condensed items, got %#v", listsRaw[0]["items_condensed"])
+	}
 }

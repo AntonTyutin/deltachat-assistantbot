@@ -97,7 +97,7 @@ func TestReplyToolTrackerUsesNoopRecorderWhenNil(t *testing.T) {
 	exec := tracker.wrap(func(context.Context, string, string) (string, error) {
 		return "ok", nil
 	})
-	if _, err := exec(context.Background(), "memory_read_lists", `{}`); err != nil {
+	if _, err := exec(context.Background(), "memory_read_list", `{}`); err != nil {
 		t.Fatal(err)
 	}
 	tracker.flush()

@@ -83,7 +83,7 @@ func TestLogToolCallSuccessSkippedWhenLevelInfo(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	LogToolCall(context.Background(), logger, "memory", "memory_read_lists", `{}`, `[]`, nil, time.Millisecond)
+	LogToolCall(context.Background(), logger, "memory", "memory_read_list", `{"list_id":"l1"}`, `{}`, nil, time.Millisecond)
 	if buf.Len() != 0 {
 		t.Fatalf("expected no logs at info level, got %s", buf.String())
 	}

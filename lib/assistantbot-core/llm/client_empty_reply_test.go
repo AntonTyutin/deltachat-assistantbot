@@ -20,7 +20,7 @@ func TestChatWithToolsRetriesAfterEmptyFinalMessage(t *testing.T) {
 		switch reqNum {
 		case 1:
 			_, _ = w.Write([]byte(`{
-				"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"memory_read_lists","arguments":"{}"}}]}}],
+				"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"memory_read_list","arguments":"{}"}}]}}],
 				"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}
 			}`))
 		case 2:
@@ -46,7 +46,7 @@ func TestChatWithToolsRetriesAfterEmptyFinalMessage(t *testing.T) {
 		{
 			Type: string(openai.ToolTypeFunction),
 			Function: &openai.FunctionDefinition{
-				Name:       "memory_read_lists",
+				Name:       "memory_read_list",
 				Parameters: map[string]any{"type": "object"},
 			},
 		},
@@ -80,7 +80,7 @@ func TestChatWithToolsEmptyFinalMessageFails(t *testing.T) {
 	}, []ToolDefinition{
 		{
 			Type: string(openai.ToolTypeFunction),
-			Function: &openai.FunctionDefinition{Name: "memory_read_lists"},
+			Function: &openai.FunctionDefinition{Name: "memory_read_list"},
 		},
 	}, func(context.Context, string, string) (string, error) { return "{}", nil })
 	if err == nil {

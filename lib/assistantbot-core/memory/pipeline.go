@@ -212,10 +212,10 @@ func (p *Pipeline) ListsContext(ctx context.Context, chatID string, message tran
 			return nil, err
 		}
 		out = append(out, map[string]any{
-			"id":    list.ID,
-			"kind":  list.Kind,
-			"title": list.Title,
-			"items": items,
+			"id":              list.ID,
+			"kind":            list.Kind,
+			"title":           list.Title,
+			"items_condensed": CondenseListItems(items),
 		})
 	}
 	reminders, err := p.store.ListReminders(ctx, chatID, storage.ReminderPending)
