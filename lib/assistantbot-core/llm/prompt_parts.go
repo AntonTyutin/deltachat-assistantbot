@@ -13,10 +13,10 @@ type promptPartsContextKey struct{}
 
 // PromptParts holds UTF-8 byte sizes of the initial prompt components for one LLM call.
 type PromptParts struct {
-	System            int
-	Tools             int // system_prompt_append from MCP and memory tools combined
-	ToolsDefinitions  int // serialized tool definitions (MCP + memory)
-	User              int
+	System           int
+	Tools            int // system_prompt_append from MCP and memory tools combined
+	ToolsDefinitions int // serialized tool definitions (MCP + memory)
+	User             int
 }
 
 // NewPromptParts measures prompt component sizes. baseSystem is the task prompt from the

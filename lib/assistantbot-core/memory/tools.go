@@ -71,11 +71,13 @@ func (r *ToolRegistry) ToolsForTask(task string) []llm.ToolDefinition {
 		functionTool("memory_set_reminder", "Schedule a one-time or recurring reminder in the current chat", map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"text":       map[string]any{"type": "string"},
-				"due_at":     map[string]any{"type": "string", "description": "RFC3339 timestamp of the first occurrence"},
-				"recurrence": recurrenceToolSchema(),
+				"text":          map[string]any{"type": "string", "description": "Static reminder text for mode=text"},
+				"mode":          map[string]any{"type": "string", "enum": []string{"text", "action"}, "description": "text=send static text, action=execute action_prompt via tools"},
+				"action_prompt": map[string]any{"type": "string", "description": "Instruction for action mode, e.g. fetch weather/news digest"},
+				"due_at":        map[string]any{"type": "string", "description": "RFC3339 timestamp of the first occurrence"},
+				"recurrence":    recurrenceToolSchema(),
 			},
-			"required": []string{"text", "due_at"},
+			"required": []string{"due_at"},
 		}),
 		functionTool("memory_list_reminders", "List pending reminders for the current chat", map[string]any{
 			"type":       "object",
@@ -84,12 +86,14 @@ func (r *ToolRegistry) ToolsForTask(task string) []llm.ToolDefinition {
 		functionTool("memory_update_reminder", "Update a pending reminder by id. Use memory_list_reminders to find id. Change only what the user asked: time (HH:MM, keeps date/weekday pattern), weekdays (keeps clock), due_at (full datetime), text, or recurrence.", map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"reminder_id": map[string]any{"type": "string"},
-				"text":        map[string]any{"type": "string"},
-				"due_at":      map[string]any{"type": "string", "description": "RFC3339; full new first/next occurrence when date and time both change"},
-				"time":        map[string]any{"type": "string", "description": "Local HH:MM or HH:MM:SS; change only time of day, keep anchor calendar date"},
-				"weekdays":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Change weekday(s) for weekly series or move one-shot; keeps time of day"},
-				"recurrence":  recurrenceToolSchema(),
+				"reminder_id":   map[string]any{"type": "string"},
+				"text":          map[string]any{"type": "string"},
+				"mode":          map[string]any{"type": "string", "enum": []string{"text", "action"}},
+				"action_prompt": map[string]any{"type": "string"},
+				"due_at":        map[string]any{"type": "string", "description": "RFC3339; full new first/next occurrence when date and time both change"},
+				"time":          map[string]any{"type": "string", "description": "Local HH:MM or HH:MM:SS; change only time of day, keep anchor calendar date"},
+				"weekdays":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Change weekday(s) for weekly series or move one-shot; keeps time of day"},
+				"recurrence":    recurrenceToolSchema(),
 			},
 			"required": []string{"reminder_id"},
 		}),
@@ -118,6 +122,7 @@ Relevant lists/notes in chat context include id, title, kind, and items_condense
 For lists (todo/shopping), use memory_read_list before batch tools: memory_add_list_items, memory_remove_list_items, memory_complete_list_items, memory_uncomplete_list_items. Match items by text and/or item_ids.
 When creating a new note or list and no existing one fits, pick a specific title that reflects purpose, channel, or scope (e.g. "Online groceries (general)" vs "Metro — weekend"), not vague labels like "shopping" or "notes". If the user did not give enough detail (offline vs online, store-specific vs general, topic area for notes, etc.), ask one short clarifying question in chat before calling memory_add_list_items or memory_add_note.
 For reminders, parse due_at as RFC3339. If timezone is unknown, ask the user and store timezone in profile when provided.
+Use mode=text (default) for static reminders and mode=action for reminders that should execute action_prompt via tools/APIs at trigger time (weather/news digests, etc.).
 For recurring reminders, pass recurrence: interval + frequency (minute/hour/day/week/month/year). Weekly: weekdays (monday..sunday). Monthly/yearly: monthly_mode day_of_month (same calendar day, clamped), last_day_of_month, or nth_weekday with nth_weekday (1..5 or -1) and weekday. End: never, on_date (RFC3339 date), or after_count (integer). due_at is always the first occurrence; cancel removes the whole series.
 To reschedule, call memory_list_reminders, then memory_update_reminder: use time alone to shift clock only (e.g. 10:30); weekdays alone to shift day(s) only (e.g. sunday); due_at when both date and time change. For recurrence updates, pass only fields to change (merged with existing rule).
 Use the chat language to store notes, list items, and reminders.`)
@@ -237,9 +242,11 @@ func (r *ToolRegistry) readList(ctx context.Context, chatID, argumentsJSON strin
 
 func (r *ToolRegistry) setReminder(ctx context.Context, chatID, requesterID, argumentsJSON string) (string, error) {
 	var args struct {
-		Text       string          `json:"text"`
-		DueAt      string          `json:"due_at"`
-		Recurrence json.RawMessage `json:"recurrence"`
+		Text         string          `json:"text"`
+		Mode         string          `json:"mode"`
+		ActionPrompt string          `json:"action_prompt"`
+		DueAt        string          `json:"due_at"`
+		Recurrence   json.RawMessage `json:"recurrence"`
 	}
 	if err := json.Unmarshal([]byte(argumentsJSON), &args); err != nil {
 		return "", err
@@ -256,17 +263,35 @@ func (r *ToolRegistry) setReminder(ctx context.Context, chatID, requesterID, arg
 	if err != nil {
 		return "", err
 	}
+	mode := storage.ReminderMode(strings.ToLower(strings.TrimSpace(args.Mode)))
+	if mode == "" {
+		mode = storage.ReminderModeText
+	}
+	switch mode {
+	case storage.ReminderModeText:
+		if strings.TrimSpace(args.Text) == "" {
+			return "", fmt.Errorf("text is required for mode=text")
+		}
+	case storage.ReminderModeAction:
+		if strings.TrimSpace(args.ActionPrompt) == "" {
+			return "", fmt.Errorf("action_prompt is required for mode=action")
+		}
+	default:
+		return "", fmt.Errorf("unknown mode %q", args.Mode)
+	}
 	now := time.Now()
 	reminder := storage.Reminder{
-		ID:          storage.NewReminderID(chatID, now),
-		ChatID:      chatID,
-		RequesterID: requesterID,
-		DueAt:       dueAt,
-		AnchorAt:    dueAt,
-		Text:        args.Text,
-		Status:      storage.ReminderPending,
-		CreatedAt:   now,
-		Recurrence:  recurrence,
+		ID:           storage.NewReminderID(chatID, now),
+		ChatID:       chatID,
+		RequesterID:  requesterID,
+		DueAt:        dueAt,
+		AnchorAt:     dueAt,
+		Text:         args.Text,
+		Mode:         mode,
+		ActionPrompt: strings.TrimSpace(args.ActionPrompt),
+		Status:       storage.ReminderPending,
+		CreatedAt:    now,
+		Recurrence:   recurrence,
 	}
 	if err := r.store.UpsertReminder(ctx, reminder); err != nil {
 		return "", err
@@ -275,6 +300,7 @@ func (r *ToolRegistry) setReminder(ctx context.Context, chatID, requesterID, arg
 		"status":      "scheduled",
 		"reminder_id": reminder.ID,
 		"due_at":      reminder.DueAt.Format(time.RFC3339),
+		"mode":        reminder.Mode,
 	}
 	if recurrence != nil {
 		out["recurring"] = true

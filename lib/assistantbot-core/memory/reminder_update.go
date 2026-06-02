@@ -36,12 +36,14 @@ func recurrenceToolSchema() map[string]any {
 
 func (r *ToolRegistry) updateReminder(ctx context.Context, chatID, requesterID, argumentsJSON string) (string, error) {
 	var args struct {
-		ReminderID string          `json:"reminder_id"`
-		Text       string          `json:"text"`
-		DueAt      string          `json:"due_at"`
-		Time       string          `json:"time"`
-		Weekdays   []string        `json:"weekdays"`
-		Recurrence json.RawMessage `json:"recurrence"`
+		ReminderID   string          `json:"reminder_id"`
+		Text         string          `json:"text"`
+		Mode         string          `json:"mode"`
+		ActionPrompt string          `json:"action_prompt"`
+		DueAt        string          `json:"due_at"`
+		Time         string          `json:"time"`
+		Weekdays     []string        `json:"weekdays"`
+		Recurrence   json.RawMessage `json:"recurrence"`
 	}
 	if err := json.Unmarshal([]byte(argumentsJSON), &args); err != nil {
 		return "", err
@@ -50,8 +52,8 @@ func (r *ToolRegistry) updateReminder(ctx context.Context, chatID, requesterID, 
 	if reminderID == "" {
 		return "", fmt.Errorf("reminder_id is required")
 	}
-	if args.Text == "" && args.DueAt == "" && args.Time == "" && len(args.Weekdays) == 0 && len(args.Recurrence) == 0 {
-		return "", fmt.Errorf("at least one of text, due_at, time, weekdays, or recurrence is required")
+	if args.Text == "" && args.Mode == "" && args.ActionPrompt == "" && args.DueAt == "" && args.Time == "" && len(args.Weekdays) == 0 && len(args.Recurrence) == 0 {
+		return "", fmt.Errorf("at least one of text, mode, action_prompt, due_at, time, weekdays, or recurrence is required")
 	}
 
 	reminder, ok, err := r.store.GetReminder(ctx, chatID, reminderID)
@@ -76,6 +78,18 @@ func (r *ToolRegistry) updateReminder(ctx context.Context, chatID, requesterID, 
 
 	if args.Text != "" {
 		reminder.Text = args.Text
+	}
+	if args.ActionPrompt != "" {
+		reminder.ActionPrompt = strings.TrimSpace(args.ActionPrompt)
+	}
+	if args.Mode != "" {
+		mode := storage.ReminderMode(strings.ToLower(strings.TrimSpace(args.Mode)))
+		switch mode {
+		case storage.ReminderModeText, storage.ReminderModeAction:
+			reminder.Mode = mode
+		default:
+			return "", fmt.Errorf("unknown mode %q", args.Mode)
+		}
 	}
 	if len(args.Recurrence) > 0 {
 		merged, err := mergeRecurrenceRule(reminder.Recurrence, args.Recurrence, tz)
@@ -117,6 +131,18 @@ func (r *ToolRegistry) updateReminder(ctx context.Context, chatID, requesterID, 
 	if err := rescheduleReminder(&reminder, anchor, now); err != nil {
 		return "", err
 	}
+	if reminder.Mode == "" {
+		reminder.Mode = storage.ReminderModeText
+	}
+	if reminder.Mode == storage.ReminderModeText {
+		if strings.TrimSpace(reminder.Text) == "" {
+			return "", fmt.Errorf("text is required for mode=text")
+		}
+		reminder.ActionPrompt = ""
+	}
+	if reminder.Mode == storage.ReminderModeAction && strings.TrimSpace(reminder.ActionPrompt) == "" {
+		return "", fmt.Errorf("action_prompt is required for mode=action")
+	}
 	if err := r.store.UpsertReminder(ctx, reminder); err != nil {
 		return "", err
 	}
@@ -126,6 +152,7 @@ func (r *ToolRegistry) updateReminder(ctx context.Context, chatID, requesterID, 
 		"reminder_id": reminder.ID,
 		"due_at":      reminder.DueAt.Format(time.RFC3339),
 		"anchor_at":   reminder.AnchorAt.Format(time.RFC3339),
+		"mode":        reminder.Mode,
 	}
 	raw, err := json.Marshal(out)
 	if err != nil {

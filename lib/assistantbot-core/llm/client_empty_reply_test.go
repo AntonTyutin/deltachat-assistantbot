@@ -79,7 +79,7 @@ func TestChatWithToolsEmptyFinalMessageFails(t *testing.T) {
 		{Role: openai.ChatMessageRoleUser, Content: "hi"},
 	}, []ToolDefinition{
 		{
-			Type: string(openai.ToolTypeFunction),
+			Type:     string(openai.ToolTypeFunction),
 			Function: &openai.FunctionDefinition{Name: "memory_read_list"},
 		},
 	}, func(context.Context, string, string) (string, error) { return "{}", nil })

@@ -33,6 +33,9 @@ func TestGetReminderPendingOnly(t *testing.T) {
 	if got.ID != reminder.ID {
 		t.Fatalf("id = %q", got.ID)
 	}
+	if got.Mode != ReminderModeText {
+		t.Fatalf("mode = %q want %q", got.Mode, ReminderModeText)
+	}
 	if err := store.AdvanceReminder(ctx, "r-get", nil, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -132,6 +135,11 @@ func TestReminderMigrationAddsColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"anchor_at", "recurrence_json", "occurrence_count"} {
+		if !cols[name] {
+			t.Fatalf("missing column %q", name)
+		}
+	}
+	for _, name := range []string{"reminder_mode", "action_prompt"} {
 		if !cols[name] {
 			t.Fatalf("missing column %q", name)
 		}

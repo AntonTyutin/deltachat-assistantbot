@@ -97,6 +97,13 @@ const (
 	ReminderCancelled ReminderStatus = "cancelled"
 )
 
+type ReminderMode string
+
+const (
+	ReminderModeText   ReminderMode = "text"
+	ReminderModeAction ReminderMode = "action"
+)
+
 type Reminder struct {
 	ID              string                    `json:"id"`
 	ChatID          string                    `json:"chat_id"`
@@ -108,6 +115,8 @@ type Reminder struct {
 	AnchorAt        time.Time                 `json:"anchor_at,omitempty"`
 	Recurrence      *reminders.RecurrenceRule `json:"recurrence,omitempty"`
 	OccurrenceCount int                       `json:"occurrence_count,omitempty"`
+	Mode            ReminderMode              `json:"mode,omitempty"`
+	ActionPrompt    string                    `json:"action_prompt,omitempty"`
 }
 
 type NearestMessage struct {

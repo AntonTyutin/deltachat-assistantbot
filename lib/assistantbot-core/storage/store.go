@@ -172,6 +172,8 @@ func (s *Store) migrateReminderColumns(ctx context.Context) error {
 		"anchor_at":        "TEXT",
 		"recurrence_json":  "TEXT",
 		"occurrence_count": "INTEGER NOT NULL DEFAULT 0",
+		"reminder_mode":    "TEXT NOT NULL DEFAULT 'text'",
+		"action_prompt":    "TEXT NOT NULL DEFAULT ''",
 	}
 	existing, err := s.reminderColumnNames(ctx)
 	if err != nil {
@@ -941,18 +943,25 @@ func (s *Store) UpsertReminder(ctx context.Context, reminder Reminder) error {
 	if reminder.Status == "" {
 		reminder.Status = ReminderPending
 	}
+	if reminder.Mode == "" {
+		reminder.Mode = ReminderModeText
+	}
+	if reminder.Mode == ReminderModeText {
+		reminder.ActionPrompt = ""
+	}
 	recurrenceJSON, err := marshalRecurrence(reminder.Recurrence)
 	if err != nil {
 		return err
 	}
 	anchorAt := nullableTime(reminder.AnchorAt)
-	_, err = s.db.ExecContext(ctx, `INSERT INTO reminders(id, chat_id, requester_id, due_at, text, status, created_at, anchor_at, recurrence_json, occurrence_count)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO reminders(id, chat_id, requester_id, due_at, text, status, created_at, anchor_at, recurrence_json, occurrence_count, reminder_mode, action_prompt)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET due_at = excluded.due_at, text = excluded.text, status = excluded.status,
-			anchor_at = excluded.anchor_at, recurrence_json = excluded.recurrence_json, occurrence_count = excluded.occurrence_count`,
+			anchor_at = excluded.anchor_at, recurrence_json = excluded.recurrence_json, occurrence_count = excluded.occurrence_count,
+			reminder_mode = excluded.reminder_mode, action_prompt = excluded.action_prompt`,
 		reminder.ID, reminder.ChatID, reminder.RequesterID, reminder.DueAt.Format(time.RFC3339Nano),
 		reminder.Text, string(reminder.Status), reminder.CreatedAt.Format(time.RFC3339Nano),
-		anchorAt, recurrenceJSON, reminder.OccurrenceCount)
+		anchorAt, recurrenceJSON, reminder.OccurrenceCount, string(reminder.Mode), reminder.ActionPrompt)
 	return err
 }
 
@@ -978,7 +987,7 @@ func (s *Store) DueReminders(ctx context.Context, now time.Time, limit int) ([]R
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, chat_id, requester_id, due_at, text, status, created_at, anchor_at, recurrence_json, occurrence_count
+	rows, err := s.db.QueryContext(ctx, `SELECT id, chat_id, requester_id, due_at, text, status, created_at, anchor_at, recurrence_json, occurrence_count, reminder_mode, action_prompt
 		FROM reminders WHERE status = 'pending' AND due_at <= ? ORDER BY due_at ASC LIMIT ?`,
 		now.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
@@ -989,7 +998,7 @@ func (s *Store) DueReminders(ctx context.Context, now time.Time, limit int) ([]R
 }
 
 func (s *Store) GetReminder(ctx context.Context, chatID, reminderID string) (Reminder, bool, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, chat_id, requester_id, due_at, text, status, created_at, anchor_at, recurrence_json, occurrence_count
+	row := s.db.QueryRowContext(ctx, `SELECT id, chat_id, requester_id, due_at, text, status, created_at, anchor_at, recurrence_json, occurrence_count, reminder_mode, action_prompt
 		FROM reminders WHERE id = ? AND chat_id = ? AND status = 'pending'`, reminderID, chatID)
 	reminder, err := scanReminderRow(row)
 	if err == sql.ErrNoRows {
@@ -1002,7 +1011,7 @@ func (s *Store) GetReminder(ctx context.Context, chatID, reminderID string) (Rem
 }
 
 func (s *Store) ListReminders(ctx context.Context, chatID string, status ReminderStatus) ([]Reminder, error) {
-	query := `SELECT id, chat_id, requester_id, due_at, text, status, created_at, anchor_at, recurrence_json, occurrence_count FROM reminders WHERE chat_id = ?`
+	query := `SELECT id, chat_id, requester_id, due_at, text, status, created_at, anchor_at, recurrence_json, occurrence_count, reminder_mode, action_prompt FROM reminders WHERE chat_id = ?`
 	args := []any{chatID}
 	if status != "" {
 		query += ` AND status = ?`
@@ -1200,9 +1209,9 @@ func scanReminderRow(scanner interface {
 }) (Reminder, error) {
 	var reminder Reminder
 	var status, dueAt, createdAt string
-	var anchorAt, recurrenceJSON sql.NullString
+	var anchorAt, recurrenceJSON, mode, actionPrompt sql.NullString
 	if err := scanner.Scan(&reminder.ID, &reminder.ChatID, &reminder.RequesterID, &dueAt, &reminder.Text, &status, &createdAt,
-		&anchorAt, &recurrenceJSON, &reminder.OccurrenceCount); err != nil {
+		&anchorAt, &recurrenceJSON, &reminder.OccurrenceCount, &mode, &actionPrompt); err != nil {
 		return Reminder{}, err
 	}
 	reminder.Status = ReminderStatus(status)
@@ -1227,6 +1236,14 @@ func scanReminderRow(scanner interface {
 			return Reminder{}, err
 		}
 		reminder.Recurrence = &rule
+	}
+	if mode.Valid && mode.String != "" {
+		reminder.Mode = ReminderMode(mode.String)
+	} else {
+		reminder.Mode = ReminderModeText
+	}
+	if actionPrompt.Valid {
+		reminder.ActionPrompt = actionPrompt.String
 	}
 	return reminder, nil
 }

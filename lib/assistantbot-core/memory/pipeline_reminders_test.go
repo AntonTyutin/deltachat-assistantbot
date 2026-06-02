@@ -12,6 +12,29 @@ import (
 	"github.com/AntonTyutin/assistantbot-core/storage"
 )
 
+type testMCPRuntime struct {
+	tools []llm.ToolDefinition
+}
+
+func (t testMCPRuntime) ToolsForTask(task string) []llm.ToolDefinition {
+	if task != llm.TaskGenerateChatReply {
+		return nil
+	}
+	return t.tools
+}
+
+func (t testMCPRuntime) HasToolsForTask(task string) bool {
+	return len(t.ToolsForTask(task)) > 0
+}
+
+func (t testMCPRuntime) ExecuteTool(_ context.Context, _ string, _ string) (string, error) {
+	return `{"ok":true}`, nil
+}
+
+func (t testMCPRuntime) SystemPromptAppendForTask(_ string) string {
+	return ""
+}
+
 func TestSetRecurringReminder(t *testing.T) {
 	ctx := context.Background()
 	store := storage.OpenTestDB(t, "secret")
@@ -82,6 +105,132 @@ func TestSetReminderRejectsInvalidRecurrence(t *testing.T) {
 	_, err := registry.ExecuteTool(ctx, "chat-1", "user-1", "memory_set_reminder", string(args))
 	if err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestSetActionReminderRequiresActionPrompt(t *testing.T) {
+	ctx := context.Background()
+	store := storage.OpenTestDB(t, "secret")
+	defer store.Close()
+	registry := NewToolRegistry(store, llm.StaticEmbedder{Vector: []float32{0.1, 0.2, 0.3}}, nil)
+
+	args, _ := json.Marshal(map[string]any{
+		"mode":   "action",
+		"due_at": "2026-06-03T09:00:00Z",
+	})
+	if _, err := registry.ExecuteTool(ctx, "chat-1", "user-1", "memory_set_reminder", string(args)); err == nil {
+		t.Fatal("expected action_prompt validation error")
+	}
+}
+
+func TestDeliverDueRemindersExecutesActionMode(t *testing.T) {
+	ctx := context.Background()
+	store := storage.OpenTestDB(t, "secret")
+	defer store.Close()
+
+	client := llm.StaticClient{
+		Responses: map[string]json.RawMessage{
+			llm.TaskGenerateChatReply: json.RawMessage(`{"reply":"Прогноз на день: +22, без осадков."}`),
+		},
+	}
+	mcp := testMCPRuntime{
+		tools: []llm.ToolDefinition{
+			functionTool("mcp_weather", "fake weather tool", map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			}),
+		},
+	}
+	pipeline := NewPipeline(store, client, llm.StaticEmbedder{Vector: []float32{0.1}}, mcp, prompts.FixedTestRegistry(), Config{})
+
+	due := time.Date(2026, 6, 1, 8, 0, 0, 0, time.UTC)
+	reminder := storage.Reminder{
+		ID:           "r-action",
+		ChatID:       "chat-1",
+		RequesterID:  "user-1",
+		DueAt:        due,
+		AnchorAt:     due,
+		Status:       storage.ReminderPending,
+		CreatedAt:    due,
+		Mode:         storage.ReminderModeAction,
+		ActionPrompt: "Пришли сводку погоды на день",
+	}
+	if err := store.UpsertReminder(ctx, reminder); err != nil {
+		t.Fatal(err)
+	}
+
+	var sent []string
+	if err := pipeline.DeliverDueReminders(ctx, due, func(_ context.Context, _ string, text string) error {
+		sent = append(sent, text)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent = %d", len(sent))
+	}
+	if sent[0] != "Прогноз на день: +22, без осадков." {
+		t.Fatalf("unexpected action text: %q", sent[0])
+	}
+}
+
+func TestDeliverDueRemindersSkipsFailedActionAndContinues(t *testing.T) {
+	ctx := context.Background()
+	store := storage.OpenTestDB(t, "secret")
+	defer store.Close()
+
+	client := llm.StaticClient{
+		Responses: map[string]json.RawMessage{
+			llm.TaskGenerateChatReply: json.RawMessage(`{"reply":"ok from llm"}`),
+		},
+	}
+	pipeline := NewPipeline(store, client, llm.StaticEmbedder{Vector: []float32{0.1}}, nil, prompts.FixedTestRegistry(), Config{})
+
+	now := time.Date(2026, 6, 1, 8, 0, 0, 0, time.UTC)
+	action := storage.Reminder{
+		ID:           "r-action-fail",
+		ChatID:       "chat-1",
+		RequesterID:  "user-1",
+		DueAt:        now,
+		AnchorAt:     now,
+		Status:       storage.ReminderPending,
+		CreatedAt:    now,
+		Mode:         storage.ReminderModeAction,
+		ActionPrompt: "fetch weather",
+	}
+	if err := store.UpsertReminder(ctx, action); err != nil {
+		t.Fatal(err)
+	}
+	text := storage.Reminder{
+		ID:          "r-text",
+		ChatID:      "chat-1",
+		RequesterID: "user-1",
+		DueAt:       now,
+		Text:        "static",
+		Status:      storage.ReminderPending,
+		CreatedAt:   now,
+	}
+	if err := store.UpsertReminder(ctx, text); err != nil {
+		t.Fatal(err)
+	}
+
+	var sent []string
+	if err := pipeline.DeliverDueReminders(ctx, now, func(_ context.Context, _ string, msg string) error {
+		sent = append(sent, msg)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 1 || sent[0] != "Reminder: static" {
+		t.Fatalf("unexpected sent messages: %#v", sent)
+	}
+	// Failed action reminder should remain pending for retry.
+	remaining, err := store.ListReminders(ctx, "chat-1", storage.ReminderPending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != "r-action-fail" {
+		t.Fatalf("unexpected pending reminders: %#v", remaining)
 	}
 }
 

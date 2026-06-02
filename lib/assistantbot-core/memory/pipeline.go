@@ -2,7 +2,12 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
+
+	openai "github.com/sashabaranov/go-openai"
 
 	"github.com/AntonTyutin/assistantbot-core/llm"
 	"github.com/AntonTyutin/assistantbot-core/metrics"
@@ -16,6 +21,7 @@ type Pipeline struct {
 	llm      llm.Client
 	embedder llm.Embedder
 	mcp      mcpToolRuntime
+	prompts  promptRegistry
 	cfg      Config
 
 	profiles  *ProfileManager
@@ -32,7 +38,7 @@ type mcpToolRuntime interface {
 }
 
 func NewPipeline(store *storage.Store, llmClient llm.Client, embedder llm.Embedder, mcp mcpToolRuntime, promptReg promptRegistry, cfg Config) *Pipeline {
-	p := &Pipeline{store: store, llm: llmClient, embedder: embedder, mcp: mcp, cfg: cfg.withDefaults()}
+	p := &Pipeline{store: store, llm: llmClient, embedder: embedder, mcp: mcp, prompts: promptReg, cfg: cfg.withDefaults()}
 	p.profiles = NewProfileManager(store, llmClient)
 	p.topics = NewTopicManager(store, llmClient, embedder, p.cfg)
 	p.locations = NewLocationResolver(store, llmClient, mcp, promptReg)
@@ -290,7 +296,11 @@ func (p *Pipeline) DeliverDueReminders(ctx context.Context, now time.Time, send 
 		return err
 	}
 	for _, reminder := range due {
-		text := "Reminder: " + reminder.Text
+		text, err := p.renderReminderText(ctx, reminder)
+		if err != nil {
+			p.logReminderRenderError(ctx, reminder, err)
+			continue
+		}
 		if err := send(ctx, reminder.ChatID, text); err != nil {
 			return err
 		}
@@ -317,6 +327,103 @@ func (p *Pipeline) DeliverDueReminders(ctx context.Context, now time.Time, send 
 		}
 	}
 	return nil
+}
+
+func (p *Pipeline) renderReminderText(ctx context.Context, reminder storage.Reminder) (string, error) {
+	if reminder.Mode != storage.ReminderModeAction {
+		return "🔔 " + reminder.Text, nil
+	}
+	actionPrompt := strings.TrimSpace(reminder.ActionPrompt)
+	if actionPrompt == "" {
+		return "", fmt.Errorf("reminder %s: empty action_prompt", reminder.ID)
+	}
+	defs := p.actionToolDefs()
+	if len(defs) == 0 {
+		return "", fmt.Errorf("reminder %s: no tools available for action", reminder.ID)
+	}
+	system := "Generate a concise message for chat based on the action prompt. Use tools when needed. Return only JSON: {\"reply\":\"...\"}."
+	if p.prompts != nil {
+		mcpAppend := ""
+		if p.mcp != nil {
+			mcpAppend = p.mcp.SystemPromptAppendForTask(llm.TaskGenerateChatReply)
+		}
+		system = p.prompts.SystemPromptForMCP(mcpAppend)
+	}
+	payload := map[string]any{
+		"type":          "reminder_action",
+		"chat_id":       reminder.ChatID,
+		"requester_id":  reminder.RequesterID,
+		"action_prompt": actionPrompt,
+		"timezone":      reminderTimezone(reminder),
+		"now":           time.Now().UTC().Format(time.RFC3339),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	msgs := []openai.ChatCompletionMessage{
+		{Role: openai.ChatMessageRoleSystem, Content: system},
+		{Role: openai.ChatMessageRoleUser, Content: string(raw)},
+	}
+	text, err := p.llm.ChatWithTools(ctx, llm.TaskGenerateChatReply, msgs, defs, p.executeActionTool)
+	if err != nil {
+		return "", err
+	}
+	reply := extractReplyJSON(text)
+	if reply == "" {
+		return "", fmt.Errorf("reminder %s: empty action reply", reminder.ID)
+	}
+	return reply, nil
+}
+
+func (p *Pipeline) actionToolDefs() []llm.ToolDefinition {
+	if p.mcp == nil {
+		return nil
+	}
+	return p.mcp.ToolsForTask(llm.TaskGenerateChatReply)
+}
+
+func (p *Pipeline) executeActionTool(ctx context.Context, toolName string, argumentsJSON string) (string, error) {
+	if strings.HasPrefix(toolName, "memory_") {
+		return "", fmt.Errorf("memory tools are disabled for reminder actions")
+	}
+	if p.mcp == nil {
+		return "", fmt.Errorf("mcp tools unavailable")
+	}
+	return p.mcp.ExecuteTool(ctx, toolName, argumentsJSON)
+}
+
+func (p *Pipeline) logReminderRenderError(ctx context.Context, reminder storage.Reminder, err error) {
+	if p.cfg.Logger == nil {
+		return
+	}
+	p.cfg.Logger.WarnContext(ctx, "reminder action render failed",
+		"reminder_id", reminder.ID,
+		"chat_id", reminder.ChatID,
+		"mode", reminder.Mode,
+		"error", err)
+}
+
+func reminderTimezone(reminder storage.Reminder) string {
+	if reminder.Recurrence != nil && strings.TrimSpace(reminder.Recurrence.Timezone) != "" {
+		return strings.TrimSpace(reminder.Recurrence.Timezone)
+	}
+	return "UTC"
+}
+
+func extractReplyJSON(text string) string {
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(text, "```json")
+	text = strings.TrimPrefix(text, "```")
+	text = strings.TrimSuffix(text, "```")
+	text = strings.TrimSpace(text)
+	var payload struct {
+		Reply string `json:"reply"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Reply)
 }
 
 type profilePatch struct {
