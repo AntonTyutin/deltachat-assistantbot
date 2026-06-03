@@ -36,6 +36,8 @@ func (r *recordingPromptMetrics) RecordChatMemoryTaskDuration(string, time.Durat
 func (r *recordingPromptMetrics) RecordReplyToolCall(string, string, string, time.Duration) {
 }
 func (r *recordingPromptMetrics) RecordInboundMessageToolCallCount(string, int) {}
+func (r *recordingPromptMetrics) RecordEmbedding(string, string, time.Duration, error, string, int, int) {
+}
 
 func TestNewPromptParts(t *testing.T) {
 	tools := []ToolDefinition{

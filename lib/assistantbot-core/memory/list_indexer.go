@@ -33,7 +33,7 @@ func (i *ListIndexer) Reindex(ctx context.Context, listID string) error {
 		return err
 	}
 	text := storage.ListEmbeddingText(list.Kind, list.Title, items)
-	vectors, err := i.embedder.Embed(ctx, text)
+	vectors, err := i.embedder.Embed(llm.ContextWithEmbeddingPurpose(ctx, llm.EmbeddingPurposeList), text)
 	if err != nil {
 		return err
 	}

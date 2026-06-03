@@ -221,7 +221,7 @@ func TestDeliverDueRemindersSkipsFailedActionAndContinues(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(sent) != 1 || sent[0] != "Reminder: static" {
+	if len(sent) != 1 || sent[0] != "🔔 static" {
 		t.Fatalf("unexpected sent messages: %#v", sent)
 	}
 	// Failed action reminder should remain pending for retry.

@@ -67,6 +67,8 @@ type Recorder interface {
 	// RecordPromptPartBytes records UTF-8 byte size of one initial prompt component for an LLM call.
 	// part is PromptPartSystem, PromptPartTools, PromptPartToolsDefinitions, or PromptPartUser.
 	RecordPromptPartBytes(task, part string, bytes int)
+	// RecordEmbedding records one embeddings HTTP call. purpose labels the caller (see llm.EmbeddingPurpose*).
+	RecordEmbedding(purpose, model string, dur time.Duration, apiErr error, responseOutcome string, promptTokens, totalTokens int)
 }
 
 // Noop is a Recorder that discards all events.
@@ -88,3 +90,5 @@ func (noopRecorder) RecordReplyToolCall(string, string, string, time.Duration) {
 }
 func (noopRecorder) RecordInboundMessageToolCallCount(string, int) {}
 func (noopRecorder) RecordPromptPartBytes(string, string, int)     {}
+func (noopRecorder) RecordEmbedding(string, string, time.Duration, error, string, int, int) {
+}

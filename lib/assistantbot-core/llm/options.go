@@ -1,6 +1,8 @@
 package llm
 
 import (
+	"log/slog"
+
 	"github.com/AntonTyutin/assistantbot-core/llm/prompts"
 	"github.com/AntonTyutin/assistantbot-core/metrics"
 )
@@ -32,6 +34,27 @@ func WithPrompts(reg *prompts.Registry) OpenRouterOption {
 	return func(c *OpenRouterClient) {
 		if reg != nil {
 			c.prompts = reg
+		}
+	}
+}
+
+// EmbedderOption configures [OpenAICompatibleEmbedder].
+type EmbedderOption func(*OpenAICompatibleEmbedder)
+
+// WithEmbedderRecorder attaches a metrics recorder (e.g. [metrics.Prometheus]). Nil is ignored.
+func WithEmbedderRecorder(r metrics.Recorder) EmbedderOption {
+	return func(e *OpenAICompatibleEmbedder) {
+		if r != nil {
+			e.recorder = r
+		}
+	}
+}
+
+// WithEmbedderLogger sets the logger for embedding requests. Nil is ignored.
+func WithEmbedderLogger(logger *slog.Logger) EmbedderOption {
+	return func(e *OpenAICompatibleEmbedder) {
+		if logger != nil {
+			e.logger = logger
 		}
 	}
 }

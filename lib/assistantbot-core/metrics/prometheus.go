@@ -36,6 +36,10 @@ type Prometheus struct {
 	replyToolCallDuration       *prometheus.HistogramVec
 	inboundMessageToolCallCount *prometheus.HistogramVec
 	promptPartBytes             *prometheus.HistogramVec
+	embeddingRequests           *prometheus.CounterVec
+	embeddingDuration           *prometheus.HistogramVec
+	embeddingPromptTokens       *prometheus.CounterVec
+	embeddingTotalTokens        *prometheus.CounterVec
 	serviceStarted              *prometheus.CounterVec
 }
 
@@ -195,6 +199,39 @@ func NewPrometheus(reg prometheus.Registerer, botID, version string) *Prometheus
 			},
 			[]string{"bot_id", "task", "part"},
 		),
+		embeddingRequests: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "llm_embedding_requests_total",
+				Help:      "Embedding API requests by purpose, model, and outcome.",
+			},
+			[]string{"bot_id", "purpose", "model", "outcome"},
+		),
+		embeddingDuration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: namespace,
+				Name:      "llm_embedding_duration_seconds",
+				Help:      "Latency of successful embedding HTTP requests.",
+				Buckets:   llmBuckets,
+			},
+			[]string{"bot_id", "purpose", "model"},
+		),
+		embeddingPromptTokens: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "llm_embedding_prompt_tokens_total",
+				Help:      "Prompt tokens reported by the embeddings API, per purpose and model.",
+			},
+			[]string{"bot_id", "purpose", "model"},
+		),
+		embeddingTotalTokens: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "llm_embedding_total_tokens_total",
+				Help:      "Total tokens reported by the embeddings API, per purpose and model.",
+			},
+			[]string{"bot_id", "purpose", "model"},
+		),
 		serviceStarted: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: namespace,
@@ -223,6 +260,10 @@ func NewPrometheus(reg prometheus.Registerer, botID, version string) *Prometheus
 		p.replyToolCallDuration,
 		p.inboundMessageToolCallCount,
 		p.promptPartBytes,
+		p.embeddingRequests,
+		p.embeddingDuration,
+		p.embeddingPromptTokens,
+		p.embeddingTotalTokens,
 		p.serviceStarted,
 	)
 	version = strings.TrimSpace(version)
@@ -305,6 +346,31 @@ func (p *Prometheus) RecordPromptPartBytes(task, part string, bytes int) {
 		return
 	}
 	p.promptPartBytes.WithLabelValues(p.botID, task, part).Observe(float64(bytes))
+}
+
+// RecordEmbedding implements Recorder.
+func (p *Prometheus) RecordEmbedding(purpose, model string, dur time.Duration, apiErr error, responseOutcome string, promptTokens, totalTokens int) {
+	purpose = strings.TrimSpace(purpose)
+	if purpose == "" {
+		purpose = "unknown"
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = "unknown"
+	}
+	if apiErr != nil {
+		out := classifyAPIOutcome(apiErr)
+		p.embeddingRequests.WithLabelValues(p.botID, purpose, model, out).Inc()
+		return
+	}
+	p.embeddingDuration.WithLabelValues(p.botID, purpose, model).Observe(dur.Seconds())
+	if promptTokens > 0 {
+		p.embeddingPromptTokens.WithLabelValues(p.botID, purpose, model).Add(float64(promptTokens))
+	}
+	if totalTokens > 0 {
+		p.embeddingTotalTokens.WithLabelValues(p.botID, purpose, model).Add(float64(totalTokens))
+	}
+	p.embeddingRequests.WithLabelValues(p.botID, purpose, model, responseOutcome).Inc()
 }
 
 func classifyAPIOutcome(err error) string {

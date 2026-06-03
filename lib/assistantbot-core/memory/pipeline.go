@@ -276,7 +276,7 @@ func (p *Pipeline) embedQueryMessage(ctx context.Context, message transport.Mess
 			parentText = parent.Text
 		}
 	}
-	vectors, err := p.embedder.Embed(ctx, llm.MessageEmbeddingText(message.Text, parentText))
+	vectors, err := p.embedder.Embed(llm.ContextWithEmbeddingPurpose(ctx, llm.EmbeddingPurposeMessage), llm.MessageEmbeddingText(message.Text, parentText))
 	if err != nil {
 		return nil, err
 	}
@@ -342,11 +342,13 @@ func (p *Pipeline) renderReminderText(ctx context.Context, reminder storage.Remi
 		return "", fmt.Errorf("reminder %s: no tools available for action", reminder.ID)
 	}
 	system := "Generate a concise message for chat based on the action prompt. Use tools when needed. Return only JSON: {\"reply\":\"...\"}."
+	baseSystem := system
+	mcpAppend := ""
 	if p.prompts != nil {
-		mcpAppend := ""
 		if p.mcp != nil {
 			mcpAppend = p.mcp.SystemPromptAppendForTask(llm.TaskGenerateChatReply)
 		}
+		baseSystem = p.prompts.SystemPrompt(llm.TaskGenerateChatReply)
 		system = p.prompts.SystemPromptForMCP(mcpAppend)
 	}
 	payload := map[string]any{
@@ -365,6 +367,9 @@ func (p *Pipeline) renderReminderText(ctx context.Context, reminder storage.Remi
 		{Role: openai.ChatMessageRoleSystem, Content: system},
 		{Role: openai.ChatMessageRoleUser, Content: string(raw)},
 	}
+	user := string(raw)
+	parts := llm.NewPromptParts(baseSystem, mcpAppend, "", user, defs)
+	ctx = llm.ContextWithPromptParts(ctx, parts)
 	text, err := p.llm.ChatWithTools(ctx, llm.TaskGenerateChatReply, msgs, defs, p.executeActionTool)
 	if err != nil {
 		return "", err

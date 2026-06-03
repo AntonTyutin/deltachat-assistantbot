@@ -88,7 +88,15 @@ func NewFromConfig(ctx context.Context, cfg config.Config, logger *slog.Logger) 
 		llm.WithRecorder(recorder),
 		llm.WithRetryBackoffMultiplier(cfg.LLMRetryBackoffMultiplier),
 	)
-	embedder := llm.NewOpenAICompatibleEmbedder(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.EmbeddingModel, cfg.EmbeddingDimensions, cfg.HTTPTimeout)
+	embedder := llm.NewOpenAICompatibleEmbedder(
+		cfg.LLMBaseURL,
+		cfg.LLMAPIKey,
+		cfg.EmbeddingModel,
+		cfg.EmbeddingDimensions,
+		cfg.HTTPTimeout,
+		llm.WithEmbedderLogger(logger),
+		llm.WithEmbedderRecorder(recorder),
+	)
 
 	var mcpReg *mcpclient.Registry
 	if len(cfg.MCPServers) > 0 {

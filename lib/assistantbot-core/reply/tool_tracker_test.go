@@ -40,6 +40,8 @@ func (r *recordingToolMetrics) RecordReplyToolCall(source, tool, outcome string,
 }
 
 func (r *recordingToolMetrics) RecordPromptPartBytes(string, string, int) {}
+func (r *recordingToolMetrics) RecordEmbedding(string, string, time.Duration, error, string, int, int) {
+}
 
 func (r *recordingToolMetrics) RecordInboundMessageToolCallCount(source string, count int) {
 	r.counts = append(r.counts, sourceCountRecord{source: source, count: count})

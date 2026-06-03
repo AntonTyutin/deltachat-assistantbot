@@ -210,7 +210,7 @@ func (m *TopicManager) embedMessage(ctx context.Context, message storage.Message
 			parentText = parent.Text
 		}
 	}
-	vectors, err := m.embedder.Embed(ctx, llm.MessageEmbeddingText(message.Text, parentText))
+	vectors, err := m.embedder.Embed(llm.ContextWithEmbeddingPurpose(ctx, llm.EmbeddingPurposeMessage), llm.MessageEmbeddingText(message.Text, parentText))
 	if err != nil {
 		return nil, err
 	}
@@ -225,7 +225,7 @@ func (m *TopicManager) embedTopicSummary(ctx context.Context, summary string) ([
 	if summary == "" {
 		return nil, nil
 	}
-	vectors, err := m.embedder.Embed(ctx, summary)
+	vectors, err := m.embedder.Embed(llm.ContextWithEmbeddingPurpose(ctx, llm.EmbeddingPurposeTopicSummary), summary)
 	if err != nil {
 		return nil, err
 	}
