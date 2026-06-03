@@ -27,11 +27,27 @@ if [[ -n "$latest_tag" ]]; then
 	fi
 fi
 
-if [[ "$BEFORE" == "0000000000000000000000000000000000000000" ]]; then
-	mapfile -t messages < <(git log --reverse --format=%s -1 "$AFTER")
-else
-	mapfile -t messages < <(git log --reverse --format=%s "${BEFORE}..${AFTER}")
-fi
+# github.event.before is stale after amend + force-push: the old SHA may be missing
+# or no longer an ancestor of github.sha, so BEFORE..AFTER is not always valid.
+collect_commit_messages() {
+	local before="$1" after="$2"
+	if [[ "$before" == "0000000000000000000000000000000000000000" ]]; then
+		git log --reverse --format=%s -1 "$after"
+		return
+	fi
+	if ! git rev-parse --verify "${before}^{commit}" >/dev/null 2>&1; then
+		git log --reverse --format=%s -1 "$after"
+		return
+	fi
+	if git merge-base --is-ancestor "$before" "$after" 2>/dev/null; then
+		git log --reverse --format=%s "${before}..${after}"
+	else
+		git log --reverse --format=%s "$after" --not "$before" 2>/dev/null \
+			|| git log --reverse --format=%s -1 "$after"
+	fi
+}
+
+mapfile -t messages < <(collect_commit_messages "$BEFORE" "$AFTER")
 
 if [[ ${#messages[@]} -eq 0 ]]; then
 	echo "calc-release-version: no commits between ${BEFORE} and ${AFTER}" >&2
