@@ -54,7 +54,7 @@ func FormatInstanceContext(c InstanceContext) string {
 		b.WriteString(strings.Join(names, ", "))
 	}
 	if version != "" {
-		b.WriteString("\n- Application version: ")
+		b.WriteString("\n- Your current version: ")
 		b.WriteString(version)
 	}
 	return b.String()

@@ -16,7 +16,7 @@ func TestFormatInstanceContext(t *testing.T) {
 		{
 			name: "names and version",
 			ctx:  InstanceContext{BotNames: []string{"bot", "assistant"}, Version: "2026.3.1"},
-			want: "Instance context (for your reasoning; do not recite unless the user asks):\n- You may be addressed by these names (case-insensitive): bot, assistant\n- Application version: 2026.3.1",
+			want: "Instance context (for your reasoning; do not recite unless the user asks):\n- You may be addressed by these names (case-insensitive): bot, assistant\n- Your current version: 2026.3.1",
 		},
 		{
 			// Unicode bot name: non-ASCII must survive trim/join unchanged.
@@ -27,12 +27,12 @@ func TestFormatInstanceContext(t *testing.T) {
 		{
 			name: "dedupe and lowercase",
 			ctx:  InstanceContext{BotNames: []string{"Bot", "bot", " Assistant "}, Version: "1.0"},
-			want: "Instance context (for your reasoning; do not recite unless the user asks):\n- You may be addressed by these names (case-insensitive): bot, assistant\n- Application version: 1.0",
+			want: "Instance context (for your reasoning; do not recite unless the user asks):\n- You may be addressed by these names (case-insensitive): bot, assistant\n- Your current version: 1.0",
 		},
 		{
 			name: "version only",
 			ctx:  InstanceContext{Version: "dev"},
-			want: "Instance context (for your reasoning; do not recite unless the user asks):\n- Application version: dev",
+			want: "Instance context (for your reasoning; do not recite unless the user asks):\n- Your current version: dev",
 		},
 		{
 			name: "empty",
@@ -42,7 +42,7 @@ func TestFormatInstanceContext(t *testing.T) {
 		{
 			name: "skips blank names",
 			ctx:  InstanceContext{BotNames: []string{"", " bot ", "assistant"}, Version: " 1.0 "},
-			want: "Instance context (for your reasoning; do not recite unless the user asks):\n- You may be addressed by these names (case-insensitive): bot, assistant\n- Application version: 1.0",
+			want: "Instance context (for your reasoning; do not recite unless the user asks):\n- You may be addressed by these names (case-insensitive): bot, assistant\n- Your current version: 1.0",
 		},
 	}
 
@@ -79,7 +79,7 @@ generate_chat_reply: chat participant
 	if !strings.HasPrefix(got, "memory assistant\n") {
 		t.Fatalf("base prompt missing: %q", got)
 	}
-	if !strings.Contains(got, "Application version: 2026.3.1") {
+	if !strings.Contains(got, "Your current version: 2026.3.1") {
 		t.Fatalf("instance block missing: %q", got)
 	}
 
