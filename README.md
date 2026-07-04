@@ -120,6 +120,8 @@ Each bot instance runs its own RPC server subprocess and supports exactly one ac
 
 Use YAML multiline blocks (`|`) for long prompts and examples. See [`config/llm-prompts.example.yaml`](config/llm-prompts.example.yaml).
 
+At runtime the bot appends an **instance context** block to every LLM system prompt built via `prompts.Registry`: bot names from `BOT_NAMES` and application version from the build (`VERSION` Docker build arg / `-ldflags`; local builds report `dev`). MCP and memory tool hints are appended after that block.
+
 MCP servers and OpenRouter server tools share the MCP YAML config (`ASSISTANT_BOT_MCP_SERVERS_FILE`). When the bot generates replies with tools, per-entry `system_prompt_append` is appended to the `generate_chat_reply` system prompt from the prompts YAML file (or to `default` if `generate_chat_reply` is not set).
 
 ## LLM models

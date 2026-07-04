@@ -74,6 +74,10 @@ func NewFromConfig(ctx context.Context, cfg config.Config, logger *slog.Logger) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("load llm prompts: %w", err)
 	}
+	promptReg.SetInstanceContext(prompts.InstanceContext{
+		BotNames: cfg.BotNames,
+		Version:  version.Version,
+	})
 
 	llmClient := llm.NewOpenRouterClient(
 		cfg.LLMBaseURL,

@@ -10,8 +10,9 @@ import (
 
 // Registry holds system prompts loaded from YAML.
 type Registry struct {
-	defaultPrompt string
-	byTask        map[string]string
+	defaultPrompt  string
+	byTask         map[string]string
+	instanceAppend string
 }
 
 // Load reads and validates a prompts YAML file.
@@ -88,11 +89,22 @@ func validatePromptText(key, text string) (string, error) {
 	return text, nil
 }
 
-// SystemPrompt returns the system prompt for task, falling back to default.
-func (r *Registry) SystemPrompt(task string) string {
+// SetInstanceContext configures deployment-level facts appended to every system prompt.
+func (r *Registry) SetInstanceContext(c InstanceContext) {
 	if r == nil {
-		return ""
+		return
 	}
+	r.instanceAppend = FormatInstanceContext(c)
+}
+
+func (r *Registry) appendInstance(base string) string {
+	if r == nil || r.instanceAppend == "" {
+		return base
+	}
+	return base + "\n" + r.instanceAppend
+}
+
+func (r *Registry) baseSystemPrompt(task string) string {
 	task = strings.TrimSpace(task)
 	if text, ok := r.byTask[task]; ok {
 		return text
@@ -100,9 +112,20 @@ func (r *Registry) SystemPrompt(task string) string {
 	return r.defaultPrompt
 }
 
+// SystemPrompt returns the system prompt for task, falling back to default.
+func (r *Registry) SystemPrompt(task string) string {
+	if r == nil {
+		return ""
+	}
+	return r.appendInstance(r.baseSystemPrompt(task))
+}
+
 // SystemPromptForMCP is the system message for ChatWithTools: generate_chat_reply (or default) plus MCP append.
 func (r *Registry) SystemPromptForMCP(mcpAppend string) string {
-	prompt := r.SystemPrompt(TaskGenerateChatReply)
+	if r == nil {
+		return ""
+	}
+	prompt := r.appendInstance(r.baseSystemPrompt(TaskGenerateChatReply))
 	if extra := strings.TrimSpace(mcpAppend); extra != "" {
 		prompt += "\n" + extra
 	}
